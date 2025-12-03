@@ -4,3 +4,4 @@ numpy
 reportlab
 openpyxl
 requests
+unidecode
