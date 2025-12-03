@@ -1,5 +1,5 @@
 # reposicao_app.py
-# Reposição Logística — Alivvia (Modular V8.0 - SUPABASE INTEGRADO)
+# Reposição Logística — Alivvia (Modular V8.1 - BLOQUEIO DE SEGURANÇA)
 
 import os
 import shutil
@@ -31,11 +31,53 @@ from src.data import (
 )
 from src.logic import Catalogo, mapear_tipo, mapear_colunas, calcular, construir_kits_efetivo, explodir_por_kits
 
-# IMPORTANTE: Importando as funções de Banco de Dados (Supabase)
+# Importando as funções de Banco de Dados (Supabase)
 from src.orders_db import gerar_numero_oc, salvar_pedido, listar_pedidos, atualizar_status, excluir_pedido_db
 
-# ===================== CONFIG E ESTADO =====================
+# ===================== CONFIGURAÇÃO DA PÁGINA =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
+
+# ===================== SISTEMA DE LOGIN (V8.1) =====================
+def check_password():
+    """Retorna True se o usuário logou corretamente."""
+    
+    def password_entered():
+        """Verifica se a senha digitada bate com a do Secrets."""
+        if st.session_state["password"] == st.secrets["access"]["password"]:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # Não manter a senha na sessão
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        # Primeira vez: mostra o input
+        st.text_input(
+            "🔒 Digite a Senha de Acesso:", 
+            type="password", 
+            on_change=password_entered, 
+            key="password"
+        )
+        return False
+    elif not st.session_state["password_correct"]:
+        # Senha errada
+        st.text_input(
+            "🔒 Digite a Senha de Acesso:", 
+            type="password", 
+            on_change=password_entered, 
+            key="password"
+        )
+        st.error("😕 Senha incorreta.")
+        return False
+    else:
+        # Senha correta
+        return True
+
+# BLOQUEIO TOTAL: Se não logar, o app para aqui.
+if not check_password():
+    st.stop()
+
+# ===================== FIM DO BLOQUEIO =====================
+# (Abaixo, o código original do sistema só carrega se passar pelo stop acima)
 
 def reset_selection():
     st.session_state.sel_A = {}
@@ -276,7 +318,7 @@ with st.sidebar:
         except Exception as e: st.error(str(e))
 
 # ===================== APP =====================
-st.title("Reposição Logística — Alivvia (ERP V8.0)")
+st.title("Reposição Logística — Alivvia (ERP V8.1)")
 
 if st.session_state.catalogo_df is None:
     st.warning("► Carregue o **Padrão** no sidebar para começar.")
