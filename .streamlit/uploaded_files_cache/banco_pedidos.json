@@ -1,0 +1,95 @@
+[
+    {
+        "id": "OC-ALV-2025-001",
+        "empresa": "ALIVVIA",
+        "fornecedor": "Esbelt",
+        "data_emissao": "2025-12-03",
+        "status": "RECEBIDO",
+        "obs": "",
+        "itens": [
+            {
+                "sku": "CINTA-404-BEG-2EG",
+                "fornecedor": "Esbelt",
+                "qtd": 30,
+                "valor_unit": 20.0
+            },
+            {
+                "sku": "CINTA-404-BEG-M",
+                "fornecedor": "Esbelt",
+                "qtd": 10,
+                "valor_unit": 43.36
+            },
+            {
+                "sku": null,
+                "fornecedor": null,
+                "qtd": 1,
+                "valor_unit": 0.0
+            },
+            {
+                "sku": "CINTA-404-PRETO-M",
+                "fornecedor": "Esbelt",
+                "qtd": 10,
+                "valor_unit": 46.36
+            }
+        ],
+        "valor_total": 1497.1999999999998
+    },
+    {
+        "id": "OC-ALV-2025-002",
+        "empresa": "ALIVVIA",
+        "fornecedor": "Supermedy",
+        "data_emissao": "2025-12-03",
+        "status": "RECEBIDO",
+        "obs": "",
+        "itens": [
+            {
+                "sku": "ASSENTOEGG",
+                "fornecedor": "Supermedy",
+                "qtd": 20,
+                "valor_unit": 30.0
+            },
+            {
+                "sku": "BLOCOYOGA",
+                "fornecedor": "Supermedy",
+                "qtd": 1000,
+                "valor_unit": 11.3
+            },
+            {
+                "sku": "ENCOSTOLOMBAR",
+                "fornecedor": "Supermedy",
+                "qtd": 11,
+                "valor_unit": 12.0
+            }
+        ],
+        "valor_total": 12032.0
+    },
+    {
+        "id": "OC-ALV-2025-003",
+        "empresa": "ALIVVIA",
+        "fornecedor": "Supermedy",
+        "data_emissao": "2025-12-03",
+        "status": "PENDENTE",
+        "obs": "",
+        "itens": [
+            {
+                "sku": "ASSENTOEGG",
+                "fornecedor": "Supermedy",
+                "qtd": 20,
+                "valor_unit": 35.0
+            },
+            {
+                "sku": "BLOCOYOGA",
+                "fornecedor": "Supermedy",
+                "qtd": 1000,
+                "valor_unit": 11.3
+            },
+            {
+                "sku": "ENCOSTOLOMBAR",
+                "fornecedor": "Supermedy",
+                "qtd": 10,
+                "valor_unit": 12.0
+            }
+        ],
+        "valor_total": 12120.0
+    }
+]
