@@ -1,5 +1,5 @@
 # reposicao_app.py
-# Reposição Logística — Alivvia (Modular V7.7 - LOGO PROPORCIONAL E ENQUADRADO)
+# Reposição Logística — Alivvia (Modular V8.0 - SUPABASE INTEGRADO)
 
 import os
 import shutil
@@ -20,7 +20,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
 from reportlab.lib.units import inch
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
-from reportlab.lib.utils import ImageReader  # Importante para ler o tamanho da imagem
+from reportlab.lib.utils import ImageReader
 
 # Importações dos módulos da pasta src
 from src.config import DEFAULT_SHEET_LINK, LOCAL_PADRAO_FILENAME, STORAGE_DIR
@@ -30,22 +30,9 @@ from src.data import (
     carregar_padrao_local_ou_sheets, _carregar_padrao_de_content
 )
 from src.logic import Catalogo, mapear_tipo, mapear_colunas, calcular, construir_kits_efetivo, explodir_por_kits
-from src.orders_db import gerar_numero_oc, salvar_pedido, listar_pedidos, atualizar_status
 
-# ===================== FUNÇÃO EXTRA: EXCLUIR PEDIDO =====================
-def excluir_pedido_local(oc_id):
-    """Remove um pedido do arquivo JSON local."""
-    arquivo_db = os.path.join(STORAGE_DIR, "orders.json")
-    if not os.path.exists(arquivo_db): return
-    
-    with open(arquivo_db, "r", encoding="utf-8") as f:
-        pedidos = json.load(f)
-    
-    # Filtra mantendo apenas os que NÃO são o ID a excluir
-    pedidos_novos = [p for p in pedidos if p["id"] != oc_id]
-    
-    with open(arquivo_db, "w", encoding="utf-8") as f:
-        json.dump(pedidos_novos, f, indent=4, ensure_ascii=False)
+# IMPORTANTE: Importando as funções de Banco de Dados (Supabase)
+from src.orders_db import gerar_numero_oc, salvar_pedido, listar_pedidos, atualizar_status, excluir_pedido_db
 
 # ===================== CONFIG E ESTADO =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -151,7 +138,7 @@ def buscar_preco_custo_profundo(sku_alvo):
                 except: pass
     return 0.0
 
-# --- PDF GENERATOR (V7.7 - INTELLIGENT RESIZING) ---
+# --- PDF GENERATOR ---
 def gerar_pdf_oc(oc_id: str, dados_oc: dict) -> bytes:
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
@@ -163,43 +150,29 @@ def gerar_pdf_oc(oc_id: str, dados_oc: dict) -> bytes:
     style_normal = styles['Normal']
     style_bold = ParagraphStyle('Bold', parent=styles['Normal'], fontName='Helvetica-Bold')
 
-    # --- 1. CABEÇALHO (LOGO COM REDIMENSIONAMENTO INTELIGENTE) ---
+    # CABEÇALHO
     empresa_atual = dados_oc.get('empresa', 'ALIVVIA')
-    
-    if empresa_atual == "JCA":
-        logo_path = "logo_jca.png"
-    else:
-        logo_path = "logo_alivvia.png"
+    logo_path = "logo_jca.png" if empresa_atual == "JCA" else "logo_alivvia.png"
 
     if os.path.exists(logo_path):
-        # FIX V7.7: Calcula o tamanho correto para não estourar
         try:
             img_reader = ImageReader(logo_path)
             img_w, img_h = img_reader.getSize()
             aspect = img_h / float(img_w)
-            
-            # Limites da caixa do logo (em polegadas)
-            max_h = 0.8 * inch  # Altura máxima: aprox 2cm
-            max_w = 3.0 * inch  # Largura máxima: aprox 7.6cm (metade da largura útil da página)
-            
-            # Tenta ajustar pela altura primeiro
+            max_h = 0.8 * inch
+            max_w = 3.0 * inch
             new_w = max_h / aspect
             new_h = max_h
-            
-            # Se a largura ficar muito grande, limita pela largura
             if new_w > max_w:
                 new_w = max_w
                 new_h = max_w * aspect
-            
             logo_img = RLImage(logo_path, width=new_w, height=new_h)
             logo_img.hAlign = 'LEFT'
         except:
-            # Fallback se a imagem estiver corrompida
             logo_img = Paragraph(f"<b>[{empresa_atual}]</b>", style_bold)
     else:
         logo_img = Paragraph(f"<b>[{empresa_atual}]</b>", style_bold)
 
-    # Tabela de Cabeçalho
     valor_total_br = f"R$ {dados_oc.get('valor_total', 0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     
     header_data = [
@@ -222,7 +195,7 @@ def gerar_pdf_oc(oc_id: str, dados_oc: dict) -> bytes:
     Story.append(t_header)
     Story.append(Spacer(1, 0.3*inch))
     
-    # --- 2. TABELA DE ITENS ---
+    # TABELA ITENS
     itens_df = pd.DataFrame(dados_oc['itens'])
     data = [['SKU', 'Qtd', 'Unit (R$)', 'Total (R$)', 'Qtd Conferida']]
     
@@ -246,7 +219,7 @@ def gerar_pdf_oc(oc_id: str, dados_oc: dict) -> bytes:
     Story.append(table)
     Story.append(Spacer(1, 0.4*inch))
     
-    # --- 3. CHECKLIST ---
+    # CHECKLIST
     Story.append(Paragraph("<b>CHECKLIST DE RECEBIMENTO & AUDITORIA</b>", style_bold))
     Story.append(Spacer(1, 0.1*inch))
     checklist_data = [
@@ -265,12 +238,12 @@ def gerar_pdf_oc(oc_id: str, dados_oc: dict) -> bytes:
     Story.append(t_check)
     Story.append(Spacer(1, 0.3*inch))
     
-    # --- 4. OBSERVAÇÕES ---
+    # OBS
     if dados_oc.get('obs'):
         Story.append(Paragraph(f"<b>Obs:</b> {dados_oc.get('obs')}", style_normal))
         Story.append(Spacer(1, 0.4*inch))
     
-    # --- 5. ASSINATURAS ---
+    # ASSINATURAS
     assinaturas = [
         [Paragraph('_______________________________', style_normal), Paragraph('_______________________________', style_normal)],
         [Paragraph('Assinatura do Conferente', style_normal), Paragraph('Responsável Compras/Financeiro', style_normal)],
@@ -303,7 +276,7 @@ with st.sidebar:
         except Exception as e: st.error(str(e))
 
 # ===================== APP =====================
-st.title("Reposição Logística — Alivvia (ERP V7.7)")
+st.title("Reposição Logística — Alivvia (ERP V8.0)")
 
 if st.session_state.catalogo_df is None:
     st.warning("► Carregue o **Padrão** no sidebar para começar.")
@@ -458,6 +431,7 @@ with tab3:
             st.session_state.pedido_ativo["fornecedor"] = fornecedor_oc
             st.session_state.pedido_ativo["empresa"] = empresa_oc
 
+    # V8.0: O ID vem do Banco
     num_oc_prev = gerar_numero_oc(empresa_oc)
     c3.metric("Próximo Nº", num_oc_prev)
     st.divider()
@@ -531,7 +505,7 @@ with tab3:
         obs_oc = cT1.text_area("Observações", value=st.session_state.pedido_ativo["obs"], key="obs_temp")
         cT2.metric("Valor Total", f"R$ {total_oc_real_sum:,.2f}")
         
-        if cT2.button("💾 SALVAR OC OFICIAL", type="primary"):
+        if cT2.button("💾 SALVAR OC OFICIAL (NUVEM)", type="primary"):
             if total_oc_real_sum <= 0:
                 st.error("Valor total zerado.")
             else:
@@ -545,31 +519,32 @@ with tab3:
                     "itens": st.session_state.pedido_ativo["itens"], 
                     "valor_total": float(total_oc_real_sum)
                 }
-                salvar_pedido(nova_oc)
-                st.success(f"OC {num_oc_prev} Salva!")
-                st.session_state.pedido_ativo = {"itens": [], "fornecedor": None, "empresa": None, "obs": ""}
-                time.sleep(1); st.rerun()
+                # V8.0: Salva no Supabase
+                sucesso = salvar_pedido(nova_oc)
+                if sucesso:
+                    st.success(f"OC {num_oc_prev} Salva no Banco de Dados!")
+                    st.session_state.pedido_ativo = {"itens": [], "fornecedor": None, "empresa": None, "obs": ""}
+                    time.sleep(1); st.rerun()
 
 # ---------- TAB 4: GESTÃO OCS ----------
 with tab4:
     st.header("Gerenciamento e Exportação de Pedidos")
+    # V8.0: Lista do Supabase
     df_hist = listar_pedidos()
     
     if df_hist.empty:
-        st.info("Nenhuma OC registrada.")
+        st.info("Nenhuma OC registrada no Banco de Dados.")
     else:
-        # 1. Filtro de Datas
+        # Filtros
         c_date1, c_date2 = st.columns(2)
         hj = dt.date.today()
         ini_date = c_date1.date_input("Data Início", value=hj - dt.timedelta(days=365))
         fim_date = c_date2.date_input("Data Fim", value=hj)
         
-        # Filtros Lógicos
         c_filt1, c_filt2 = st.columns(2)
         f_status = c_filt1.radio("Filtro Status", ["Todos", "PENDENTE", "RECEBIDO"], horizontal=True)
         f_empresa = c_filt2.radio("Filtro Empresa", ["Todas", "ALIVVIA", "JCA"], horizontal=True)
         
-        # Aplicando Filtros
         df_filt = df_hist.copy()
         df_filt["Data_Dt"] = pd.to_datetime(df_filt["Data"]).dt.date
         df_filt = df_filt[(df_filt["Data_Dt"] >= ini_date) & (df_filt["Data_Dt"] <= fim_date)]
@@ -577,7 +552,6 @@ with tab4:
         if f_status != "Todos": df_filt = df_filt[df_filt["Status"] == f_status]
         if f_empresa != "Todas": df_filt = df_filt[df_filt["Empresa"] == f_empresa]
 
-        # Formatação Visual da Tabela (Emojis de Status)
         def format_status(val):
             if val == "PENDENTE": return "🟠 PENDENTE"
             if val == "RECEBIDO": return "🟢 RECEBIDO"
@@ -604,7 +578,6 @@ with tab4:
             
             st.markdown(f"**Detalhes da OC {oc_sel} (Fornecedor: {dados['fornecedor']})**")
             
-            # Formatação R$ na Visualização Detalhada
             st.dataframe(
                 itens_oc, 
                 use_container_width=True,
@@ -619,6 +592,7 @@ with tab4:
             
             if dados["status"] == "PENDENTE":
                 if b2.button("🟢 Marcar RECEBIDO"):
+                    # V8.0: Atualiza no Supabase
                     atualizar_status(oc_sel, "RECEBIDO"); st.rerun()
             else:
                 b2.button("🟠 Voltar PENDENTE", on_click=lambda: atualizar_status(oc_sel, "PENDENTE"))
@@ -626,9 +600,9 @@ with tab4:
             pdf_bytes = gerar_pdf_oc(oc_sel, dados)
             b3.download_button("📄 PDF Profissional", data=pdf_bytes, file_name=f"OC_{oc_sel}.pdf", mime="application/pdf")
 
-            # Botão de Excluir (Vermelho)
             if b4.button("🗑️ Excluir Pedido", type="primary"):
-                excluir_pedido_local(oc_sel)
+                # V8.0: Remove do Supabase
+                excluir_pedido_db(oc_sel)
                 st.success(f"Pedido {oc_sel} excluído!")
                 time.sleep(1)
                 st.rerun()
