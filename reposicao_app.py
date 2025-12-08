@@ -1,5 +1,5 @@
 # reposicao_app.py
-# Reposição Logística — Alivvia (Modular V8.1 - BLOQUEIO DE SEGURANÇA)
+# Reposição Logística — Alivvia (Modular V8.2 - COM CURVA ABC & SEGURANÇA)
 
 import os
 import shutil
@@ -40,51 +40,80 @@ st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide
 # ===================== SISTEMA DE LOGIN (V8.1) =====================
 def check_password():
     """Retorna True se o usuário logou corretamente."""
-    
     def password_entered():
-        """Verifica se a senha digitada bate com a do Secrets."""
         if st.session_state["password"] == st.secrets["access"]["password"]:
             st.session_state["password_correct"] = True
-            del st.session_state["password"]  # Não manter a senha na sessão
+            del st.session_state["password"]
         else:
             st.session_state["password_correct"] = False
 
     if "password_correct" not in st.session_state:
-        # Primeira vez: mostra o input
-        st.text_input(
-            "🔒 Digite a Senha de Acesso:", 
-            type="password", 
-            on_change=password_entered, 
-            key="password"
-        )
+        st.text_input("🔒 Digite a Senha de Acesso:", type="password", on_change=password_entered, key="password")
         return False
     elif not st.session_state["password_correct"]:
-        # Senha errada
-        st.text_input(
-            "🔒 Digite a Senha de Acesso:", 
-            type="password", 
-            on_change=password_entered, 
-            key="password"
-        )
+        st.text_input("🔒 Digite a Senha de Acesso:", type="password", on_change=password_entered, key="password")
         st.error("😕 Senha incorreta.")
         return False
     else:
-        # Senha correta
         return True
 
-# BLOQUEIO TOTAL: Se não logar, o app para aqui.
 if not check_password():
     st.stop()
 
-# ===================== FIM DO BLOQUEIO =====================
-# (Abaixo, o código original do sistema só carrega se passar pelo stop acima)
-
+# ===================== FUNÇÕES AUXILIARES =====================
 def reset_selection():
     st.session_state.sel_A = {}
     st.session_state.sel_J = {}
 
 def exportar_csv_generico(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False, sep=';', decimal=',').encode("utf-8-sig")
+
+# --- NOVA FUNÇÃO V8.2: CALCULAR CURVA ABC ---
+def gerar_curva_abc(df_resultado):
+    """
+    Recebe o DataFrame de resultado (que tem vendas e preço) e calcula a curva ABC.
+    Baseado em Faturamento (Vendas 60d * Preço).
+    """
+    if df_resultado is None or df_resultado.empty:
+        return None
+
+    df = df_resultado.copy()
+    
+    # Garante numéricos
+    df["Vendas_Total_60d"] = pd.to_numeric(df["Vendas_Total_60d"], errors='coerce').fillna(0)
+    df["Preco"] = pd.to_numeric(df["Preco"], errors='coerce').fillna(0)
+    
+    # Calcula Faturamento Estimado (60 dias)
+    df["Faturamento_60d"] = df["Vendas_Total_60d"] * df["Preco"]
+    
+    # Ordena do maior para o menor faturamento
+    df = df.sort_values(by="Faturamento_60d", ascending=False).reset_index(drop=True)
+    
+    # Calcula Acumulado
+    faturamento_total = df["Faturamento_60d"].sum()
+    if faturamento_total == 0:
+        df["%_Acumulado"] = 0
+        df["Classe"] = "C"
+    else:
+        df["%_Acumulado"] = df["Faturamento_60d"].cumsum() / faturamento_total
+        
+        # Classificação ABC Clássica (80-15-5)
+        def classificar(perc):
+            if perc <= 0.80: return "A"
+            elif perc <= 0.95: return "B"
+            return "C"
+        
+        df["Classe"] = df["%_Acumulado"].apply(classificar)
+
+    # Seleciona colunas bonitas para exportar
+    cols_export = [
+        "Classe", "SKU", "fornecedor", 
+        "Vendas_Total_60d", "Preco", "Faturamento_60d", 
+        "Estoque_Full", "Estoque_Fisico", "Compra_Sugerida"
+    ]
+    cols_finais = [c for c in cols_export if c in df.columns]
+    
+    return df[cols_finais]
 
 def _ensure_state():
     st.session_state.setdefault("catalogo_df", None)
@@ -318,7 +347,7 @@ with st.sidebar:
         except Exception as e: st.error(str(e))
 
 # ===================== APP =====================
-st.title("Reposição Logística — Alivvia (ERP V8.1)")
+st.title("Reposição Logística — Alivvia (ERP V8.2)")
 
 if st.session_state.catalogo_df is None:
     st.warning("► Carregue o **Padrão** no sidebar para começar.")
@@ -373,7 +402,30 @@ with tab2:
         if c1.button("Gerar — ALIVVIA"): run_calc("ALIVVIA")
         if c2.button("Gerar — JCA"): run_calc("JCA")
         
-        st.divider()
+        # V8.2: BOTÕES DE DOWNLOAD DA CURVA ABC
+        st.write("---")
+        abc_cols = st.columns(2)
+        if st.session_state.resultado_ALIVVIA is not None:
+            df_abc_A = gerar_curva_abc(st.session_state.resultado_ALIVVIA)
+            if df_abc_A is not None:
+                abc_cols[0].download_button(
+                    "📥 Baixar Curva ABC (ALIVVIA)", 
+                    exportar_csv_generico(df_abc_A), 
+                    "curva_abc_alivvia.csv", 
+                    "text/csv"
+                )
+
+        if st.session_state.resultado_JCA is not None:
+            df_abc_J = gerar_curva_abc(st.session_state.resultado_JCA)
+            if df_abc_J is not None:
+                abc_cols[1].download_button(
+                    "📥 Baixar Curva ABC (JCA)", 
+                    exportar_csv_generico(df_abc_J), 
+                    "curva_abc_jca.csv", 
+                    "text/csv"
+                )
+        st.write("---")
+
         fc1, fc2 = st.columns(2)
         sku_filt = fc1.text_input("Filtro SKU", key="f_sku", on_change=reset_selection).upper().strip()
         
@@ -600,79 +652,4 @@ with tab4:
             return val
         
         df_view = df_filt[["ID", "Data", "Empresa", "Fornecedor", "Valor", "Status"]].copy()
-        df_view["Status"] = df_view["Status"].apply(format_status)
-        
-        st.dataframe(
-            df_view, 
-            use_container_width=True,
-            column_config={
-                "Valor": st.column_config.NumberColumn(format="R$ %.2f")
-            }
-        )
-
-        oc_sel = st.selectbox("Selecione uma OC para Detalhes/Ações", df_filt["ID"].unique(), key="oc_select_pdf")
-        
-        if oc_sel:
-            dados = df_hist[df_hist["ID"] == oc_sel].iloc[0]["Dados_Completos"]
-            itens_oc = pd.DataFrame(dados["itens"])
-            itens_oc["qtd"] = pd.to_numeric(itens_oc["qtd"]); itens_oc["valor_unit"] = pd.to_numeric(itens_oc["valor_unit"])
-            itens_oc["Total"] = itens_oc["qtd"] * itens_oc["valor_unit"]
-            
-            st.markdown(f"**Detalhes da OC {oc_sel} (Fornecedor: {dados['fornecedor']})**")
-            
-            st.dataframe(
-                itens_oc, 
-                use_container_width=True,
-                column_config={
-                    "valor_unit": st.column_config.NumberColumn("Valor Unit", format="R$ %.2f"),
-                    "Total": st.column_config.NumberColumn("Total", format="R$ %.2f")
-                }
-            )
-            
-            b1, b2, b3, b4 = st.columns(4)
-            b1.download_button("📥 Excel", exportar_csv_generico(itens_oc), f"{oc_sel}_itens.csv", "text/csv")
-            
-            if dados["status"] == "PENDENTE":
-                if b2.button("🟢 Marcar RECEBIDO"):
-                    # V8.0: Atualiza no Supabase
-                    atualizar_status(oc_sel, "RECEBIDO"); st.rerun()
-            else:
-                b2.button("🟠 Voltar PENDENTE", on_click=lambda: atualizar_status(oc_sel, "PENDENTE"))
-            
-            pdf_bytes = gerar_pdf_oc(oc_sel, dados)
-            b3.download_button("📄 PDF Profissional", data=pdf_bytes, file_name=f"OC_{oc_sel}.pdf", mime="application/pdf")
-
-            if b4.button("🗑️ Excluir Pedido", type="primary"):
-                # V8.0: Remove do Supabase
-                excluir_pedido_db(oc_sel)
-                st.success(f"Pedido {oc_sel} excluído!")
-                time.sleep(1)
-                st.rerun()
-
-# ---------- TAB 5: ALOCAÇÃO ----------
-with tab5:
-    st.header("Distribuição de Lote")
-    if st.session_state.catalogo_df is not None:
-        cat_df = st.session_state.catalogo_df
-        sku = st.selectbox("SKU", cat_df["sku"].unique())
-        qtd = st.number_input("Qtd Lote", value=1000)
-        if st.button("Calcular Divisão"):
-            try:
-                def get_demanda(emp):
-                    d = st.session_state[emp]
-                    f = mapear_colunas(load_any_table_from_bytes(d["FULL"]["name"], d["FULL"]["bytes"]), "FULL")
-                    s = mapear_colunas(load_any_table_from_bytes(d["VENDAS"]["name"], d["VENDAS"]["bytes"]), "VENDAS")
-                    cat_obj = Catalogo(cat_df.rename(columns={"sku":"component_sku"}), st.session_state.kits_df)
-                    kits = construir_kits_efetivo(cat_obj)
-                    f_ex = explodir_por_kits(f.rename(columns={"SKU":"kit_sku","Vendas_Qtd_60d":"Qtd"}), kits, "kit_sku", "Qtd")
-                    s_ex = explodir_por_kits(s.rename(columns={"SKU":"kit_sku","Quantidade":"Qtd"}), kits, "kit_sku", "Qtd")
-                    tot = pd.merge(f_ex, s_ex, on="SKU", how="outer").fillna(0)
-                    tot["Total"] = tot["Quantidade_x"] + tot["Quantidade_y"]
-                    return tot.loc[tot["SKU"] == norm_sku(sku), "Total"].sum()
-                demA = get_demanda("ALIVVIA"); demJ = get_demanda("JCA"); total = demA + demJ
-                pA = demA/total if total > 0 else 0.5
-                alocA = int(qtd * pA); alocJ = int(qtd - alocA)
-                st.write(f"ALIVVIA: {alocA} ({pA:.1%}) | JCA: {alocJ} ({1-pA:.1%})")
-                res_alloc = pd.DataFrame([{"Empresa": "ALIVVIA", "SKU": sku, "Alocacao": alocA}, {"Empresa": "JCA", "SKU": sku, "Alocacao": alocJ}])
-                st.download_button("Baixar Alocação", exportar_csv_generico(res_alloc), f"alocacao_{sku}.csv", "text/csv")
-            except Exception as e: st.error(str(e))
+        df_view
