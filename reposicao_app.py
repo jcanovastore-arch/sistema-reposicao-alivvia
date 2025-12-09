@@ -653,3 +653,51 @@ with tab4:
         
         df_view = df_filt[["ID", "Data", "Empresa", "Fornecedor", "Valor", "Status"]].copy()
         df_view
+# ---------- TAB 5: ALOCAÇÃO (EXPLOSÃO DETALHADA) ----------
+with tab5:
+    st.header("📦 Alocação de Estoque (Visão de Componentes)")
+    st.caption("Aqui você vê a necessidade real de cada componente, somando o que vende unitário + o que vende dentro dos kits.")
+
+    col_sel, _ = st.columns([1, 3])
+    empresa_aloc = col_sel.selectbox("Visualizar dados de:", ["ALIVVIA", "JCA"], key="sel_emp_aloc")
+
+    # Recupera o DataFrame calculado na Aba 2 (Análise)
+    df_resultado = st.session_state.get(f"resultado_{empresa_aloc}")
+
+    if df_resultado is None:
+        st.warning(f"⚠️ Os dados da {empresa_aloc} ainda não foram calculados.")
+        st.info("Vá até a aba '🔍 Análise', carregue os arquivos e clique em 'Gerar' primeiro.")
+    else:
+        # Filtros rápidos
+        st.markdown("---")
+        cf1, cf2, cf3 = st.columns(3)
+        mostrar_zerados = cf1.checkbox("Ocultar itens sem necessidade de compra", value=True)
+        
+        df_view_aloc = df_resultado.copy()
+        
+        if mostrar_zerados:
+            df_view_aloc = df_view_aloc[df_view_aloc["Compra_Sugerida"] > 0]
+
+        # Métricas de Topo
+        k1, k2, k3 = st.columns(3)
+        k1.metric("SKUs para Repor", len(df_view_aloc))
+        k2.metric("Total de Peças (Qtd)", int(df_view_aloc["Compra_Sugerida"].sum()))
+        valor_total = df_view_aloc["Valor_Compra_R$"].sum()
+        k3.metric("Investimento Estimado", f"R$ {valor_total:,.2f}")
+
+        # Estilização da Tabela
+        st.markdown("### 📋 Tabela de Necessidades (Explodida)")
+        
+        # Seleciona colunas mais relevantes para logística
+        cols_cols = [
+            "SKU", "Nome_Produto", "Estoque_Fisico", "Estoque_Full", 
+            "Vendas_Total_60d", "Compra_Sugerida", "fornecedor"
+        ]
+        # Garante que as colunas existam antes de mostrar
+        cols_finais = [c for c in cols_cols if c in df_view_aloc.columns]
+        
+        st.dataframe(
+            df_view_aloc[cols_finais].sort_values(by="Compra_Sugerida", ascending=False),
+            use_container_width=True,
+            height=600
+        )
