@@ -653,10 +653,10 @@ with tab4:
         
         df_view = df_filt[["ID", "Data", "Empresa", "Fornecedor", "Valor", "Status"]].copy()
         df_view
-# ---------- TAB 5: ALOCAÇÃO DE CARGA (RATEIO ENTRE EMPRESAS) ----------
+# ---------- TAB 5: ALOCAÇÃO DE CARGA (CALCULADORA DE RATEIO) ----------
 with tab5:
-    st.header("🚚 Alocação de Carga (Rateio Alivvia vs JCA)")
-    st.caption("Define quanto enviar para cada empresa com base no histórico de vendas (Share).")
+    st.header("⚖️ Alocação de Compra (SKU por SKU)")
+    st.caption("Insira a quantidade comprada de um SKU e o sistema calcula a divisão ideal entre ALIVVIA e JCA.")
 
     # 1. Carrega os resultados calculados
     df_a = st.session_state.get("resultado_ALIVVIA")
@@ -665,100 +665,98 @@ with tab5:
     if df_a is None or df_j is None:
         st.warning("⚠️ É necessário calcular as duas empresas (Alivvia e JCA) na aba 'Análise' primeiro.")
     else:
-        # 2. Prepara as tabelas para o cruzamento (pega só o essencial)
-        cols_key = ["SKU", "Vendas_Total_60d", "Compra_Sugerida", "Estoque_Fisico"]
+        # --- PREPARAÇÃO DOS DADOS (Cálculo de Base) ---
+        # Cruza os resultados das duas empresas para ter o dado lado a lado
+        df_a_clean = df_a[["SKU", "Vendas_Total_60d"]].rename(columns={"Vendas_Total_60d": "Vendas_A"})
+        df_j_clean = df_j[["SKU", "Vendas_Total_60d"]].rename(columns={"Vendas_Total_60d": "Vendas_J"})
         
-        # Garante SKU string
-        df_a_clean = df_a[cols_key].copy()
-        df_a_clean["SKU"] = df_a_clean["SKU"].astype(str).str.strip().str.upper()
-        df_a_clean = df_a_clean.rename(columns={
-            "Vendas_Total_60d": "Vendas_A", 
-            "Compra_Sugerida": "Sugestao_A",
-            "Estoque_Fisico": "Estoque_A"
-        })
-
-        df_j_clean = df_j[cols_key].copy()
-        df_j_clean["SKU"] = df_j_clean["SKU"].astype(str).str.strip().str.upper()
-        df_j_clean = df_j_clean.rename(columns={
-            "Vendas_Total_60d": "Vendas_J", 
-            "Compra_Sugerida": "Sugestao_J",
-            "Estoque_Fisico": "Estoque_J"
-        })
-
-        # 3. Faz o cruzamento total (Outer Join) - Pega SKUs de ambas
-        df_rateio = pd.merge(df_a_clean, df_j_clean, on="SKU", how="outer").fillna(0)
-
-        # 4. Cálculos de Rateio
-        df_rateio["Vendas_Total"] = df_rateio["Vendas_A"] + df_rateio["Vendas_J"]
+        # Faz o cruzamento total (Outer Join) - Pega SKUs de ambas
+        df_rateio_base = pd.merge(df_a_clean, df_j_clean, on="SKU", how="outer").fillna(0)
+        df_rateio_base["Vendas_Total"] = df_rateio_base["Vendas_A"] + df_rateio_base["Vendas_J"]
         
-        # Evita divisão por zero
-        df_rateio = df_rateio[df_rateio["Vendas_Total"] > 0].copy()
+        # Filtra apenas SKUs com algum histórico de venda
+        df_rateio_base = df_rateio_base[df_rateio_base["Vendas_Total"] > 0].copy()
 
         # Calcula a porcentagem de participação (% Share)
-        df_rateio["% Alivvia"] = (df_rateio["Vendas_A"] / df_rateio["Vendas_Total"]) * 100
-        df_rateio["% JCA"] = (df_rateio["Vendas_J"] / df_rateio["Vendas_Total"]) * 100
+        df_rateio_base["% Alivvia"] = (df_rateio_base["Vendas_A"] / df_rateio_base["Vendas_Total"]) * 100
+        df_rateio_base["% JCA"] = (df_rateio_base["Vendas_J"] / df_rateio_base["Vendas_Total"]) * 100
+        
+        # Lista de SKUs disponíveis para rateio
+        skus_disponiveis = sorted(df_rateio_base["SKU"].unique().tolist())
 
-        # Sugestão de Compra Total (Soma das necessidades)
-        df_rateio["Compra_Total_Necessaria"] = df_rateio["Sugestao_A"] + df_rateio["Sugestao_J"]
-
-        # Filtro opcional para limpar a tela
-        apenas_comprar = st.checkbox("Mostrar apenas itens com compra necessária", value=True)
-        if apenas_comprar:
-            df_rateio = df_rateio[df_rateio["Compra_Total_Necessaria"] > 0]
-
+        if not skus_disponiveis:
+             st.info("Nenhum SKU tem histórico de vendas nas duas empresas para realizar o rateio.")
+             return
+             
+        # --- UI DE RATEIO (O fluxo que você pediu) ---
+        c1, c2 = st.columns([2, 1])
+        
+        sku_selecionado = c1.selectbox(
+            "Selecione o SKU para Ratear:", 
+            skus_disponiveis, 
+            key="rateio_sku"
+        )
+        
+        qtd_comprada = c2.number_input(
+            "Quantidade Comprada:", 
+            min_value=1, 
+            value=100, 
+            step=1, 
+            key="rateio_qtd"
+        )
+        
         st.divider()
 
-        # --- SIMULADOR DE CARGA ---
-        st.subheader("Simulador de Distribuição")
-        st.info("Digite abaixo a quantidade que você COMPROU (Chegou) e veja a divisão exata.")
-
-        # Criação de um editor onde você pode digitar a "Carga Chegada"
-        # Inicialmente, sugerimos a compra necessária, mas você pode mudar
-        df_rateio["Qtd_Chegou"] = df_rateio["Compra_Total_Necessaria"]
-
-        # Configura as colunas para edição
-        col_config = {
-            "SKU": st.column_config.TextColumn("Produto", disabled=True),
-            "% Alivvia": st.column_config.NumberColumn("% ALV", format="%.0f%%", disabled=True),
-            "% JCA": st.column_config.NumberColumn("% JCA", format="%.0f%%", disabled=True),
-            "Qtd_Chegou": st.column_config.NumberColumn("🔢 QTD COMPRADA (Edite Aqui)", help="Quanto chegou do fornecedor?"),
-            "Vendas_Total": st.column_config.NumberColumn("Vendas Totais", disabled=True),
-        }
-        
-        # Mostra a tabela editável
-        df_editado = st.data_editor(
-            df_rateio[["SKU", "Vendas_Total", "% Alivvia", "% JCA", "Qtd_Chegou"]],
-            column_config=col_config,
-            use_container_width=True,
-            key="editor_rateio",
-            height=500
-        )
-
-        # 5. Aplica o Rateio Dinâmico na Tabela Editada
-        if df_editado is not None and not df_editado.empty:
-            st.markdown("### 👇 Resultado do Rateio")
+        # --- RESULTADO DO RATEIO ---
+        if sku_selecionado and qtd_comprada > 0:
+            # Pega a linha do SKU selecionado
+            linha_sku = df_rateio_base[df_rateio_base["SKU"] == sku_selecionado].iloc[0]
             
-            df_final = df_editado.copy()
-            # A mágica: Qtd Comprada * % de cada um
-            df_final["Enviar p/ Alivvia"] = (df_final["Qtd_Chegou"] * (df_final["% Alivvia"] / 100)).round(0).astype(int)
-            df_final["Enviar p/ JCA"] = (df_final["Qtd_Chegou"] * (df_final["% JCA"] / 100)).round(0).astype(int)
-            
-            # Ajuste de sobra (arredondamento) jogado para quem vende mais
-            df_final["Total_Rateado"] = df_final["Enviar p/ Alivvia"] + df_final["Enviar p/ JCA"]
-            df_final["Diferenca"] = df_final["Qtd_Chegou"] - df_final["Total_Rateado"]
-            
-            # Se sobrou 1 peça por arredondamento, joga onde o % é maior
-            mask_sobra = df_final["Diferenca"] != 0
-            # (Lógica simplificada: joga a diferença na Alivvia se ela for maior, senão JCA)
-            df_final.loc[mask_sobra & (df_final["% Alivvia"] >= 50), "Enviar p/ Alivvia"] += df_final.loc[mask_sobra, "Diferenca"]
-            df_final.loc[mask_sobra & (df_final["% Alivvia"] < 50), "Enviar p/ JCA"] += df_final.loc[mask_sobra, "Diferenca"]
+            perc_alv = linha_sku["% Alivvia"] / 100
+            perc_jca = linha_sku["% JCA"] / 100
 
-            # Mostra Tabela Final Limpa
-            st.dataframe(
-                df_final[["SKU", "Qtd_Chegou", "Enviar p/ Alivvia", "Enviar p/ JCA"]],
-                use_container_width=True,
-                column_config={
-                    "Enviar p/ Alivvia": st.column_config.NumberColumn("📦 Manda p/ ALIVVIA", format="%d un"),
-                    "Enviar p/ JCA": st.column_config.NumberColumn("📦 Manda p/ JCA", format="%d un"),
-                }
+            # Cálculos da Divisão
+            qtd_alv_float = qtd_comprada * perc_alv
+            qtd_jca_float = qtd_comprada * perc_jca
+            
+            # Arredondamento
+            qtd_alv = int(round(qtd_alv_float))
+            qtd_jca = int(round(qtd_jca_float))
+            
+            # Ajuste de arredondamento (para garantir que a soma seja igual à Qtd Comprada)
+            sobra = qtd_comprada - (qtd_alv + qtd_jca)
+            if sobra != 0:
+                 # Joga a diferença para quem tem a maior porcentagem
+                if perc_alv >= perc_jca:
+                    qtd_alv += sobra
+                else:
+                    qtd_jca += sobra
+
+            col_res1, col_res2, col_res3 = st.columns(3)
+            
+            col_res1.metric(
+                "Share (Alivvia)", 
+                f"{linha_sku['% Alivvia']:.0f}%",
+                help=f"Vendas Alivvia: {linha_sku['Vendas_A']:.0f} un."
+            )
+            col_res2.metric(
+                "Share (JCA)", 
+                f"{linha_sku['% JCA']:.0f}%",
+                help=f"Vendas JCA: {linha_sku['Vendas_J']:.0f} un."
+            )
+
+            st.markdown("### Divisão da Carga:")
+
+            col_div1, col_div2 = st.columns(2)
+            
+            col_div1.metric(
+                "📦 Enviar para ALIVVIA", 
+                f"{qtd_alv} Unidades", 
+                delta=f"Total: R$ {(qtd_alv * df_a['Preco'].loc[df_a['SKU'] == sku_selecionado].iloc[0]):,.2f}" if not df_a[df_a['SKU'] == sku_selecionado].empty else ""
+            )
+            
+            col_div2.metric(
+                "📦 Enviar para JCA", 
+                f"{qtd_jca} Unidades", 
+                delta=f"Total: R$ {(qtd_jca * df_j['Preco'].loc[df_j['SKU'] == sku_selecionado].iloc[0]):,.2f}" if not df_j[df_j['SKU'] == sku_selecionado].empty else ""
             )
