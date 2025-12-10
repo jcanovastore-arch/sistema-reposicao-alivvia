@@ -41,9 +41,13 @@ st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide
 def check_password():
     """Retorna True se o usuário logou corretamente."""
     def password_entered():
-        if st.session_state["password"] == st.secrets["access"]["password"]:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]
+        # Corrigido o erro de KeyError: 'password'
+        if "password" in st.session_state:
+            if st.session_state["password"] == st.secrets["access"]["password"]:
+                st.session_state["password_correct"] = True
+                del st.session_state["password"]
+            else:
+                st.session_state["password_correct"] = False
         else:
             st.session_state["password_correct"] = False
 
@@ -294,8 +298,8 @@ def gerar_pdf_oc(oc_id: str, dados_oc: dict) -> bytes:
     Story.append(Paragraph("<b>CHECKLIST DE RECEBIMENTO & AUDITORIA</b>", style_bold))
     Story.append(Spacer(1, 0.1*inch))
     checklist_data = [
-        ["[   ] Nota Fiscal Entregue", "[   ] Volumes Íntegros (Sem avarias)"],
-        ["[   ] Quantidades Conferidas", "[   ] Data de Entrega: ____/____/______"]
+        ["[ ] Nota Fiscal Entregue", "[ ] Volumes Íntegros (Sem avarias)"],
+        ["[ ] Quantidades Conferidas", "[ ] Data de Entrega: ____/____/______"]
     ]
     t_check = Table(checklist_data, colWidths=[3.5*inch, 3.5*inch])
     t_check.setStyle(TableStyle([
@@ -426,6 +430,78 @@ with tab2:
                 )
         st.write("---")
 
+        # --- NOVO BLOCO: BALANÇO TOTAL DE ESTOQUE (Físico e Full) ---
+        
+        # Consolida os resultados da Alivvia e JCA para o Balanço
+        df_balanco_A = st.session_state.get("resultado_ALIVVIA")
+        df_balanco_J = st.session_state.get("resultado_JCA")
+        
+        if df_balanco_A is not None and df_balanco_J is not None:
+            # Junta os dois DataFrames para calcular o Balanço Total da Companhia
+            df_total = pd.concat([
+                df_balanco_A.assign(Empresa="ALIVVIA"), 
+                df_balanco_J.assign(Empresa="JCA")
+            ])
+            
+            # 1. Calcula o valor do estoque físico atual
+            df_total["Valor_Estoque_Fisico"] = df_total["Estoque_Fisico"] * df_total["Preco"]
+            
+            # 2. Define o "Estoque Full" (Físico + Compra Sugerida)
+            # O Estoque_Full já deve vir calculado, mas vamos garantir que o Valor também esteja.
+            df_total["Estoque_Full_Calculado"] = df_total["Estoque_Fisico"] + df_total["Compra_Sugerida"]
+            df_total["Valor_Estoque_Full"] = df_total["Estoque_Full_Calculado"] * df_total["Preco"]
+            
+            # 3. Agrega os totais
+            est_fis_un = df_total["Estoque_Fisico"].sum()
+            est_fis_rs = df_total["Valor_Estoque_Fisico"].sum()
+            est_full_un = df_total["Estoque_Full_Calculado"].sum()
+            est_full_rs = df_total["Valor_Estoque_Full"].sum()
+            
+            # --- EXIBIÇÃO DOS BALANÇOS ---
+            st.markdown("---")
+            st.subheader("💰 Balanço de Estoque TOTAL (Valores e Unidades)")
+            
+            # Primeira Linha: Estoque Físico
+            col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+            
+            col_f1.metric(
+                "Estoque Físico (UN)", 
+                f"{int(est_fis_un):,d}".replace(",", ".")
+            )
+            col_f2.metric(
+                "Estoque Físico (R$)", 
+                f"R$ {est_fis_rs:,.2f}"
+            )
+
+            # Segunda Linha: Estoque Full (Físico + Compra Sugerida)
+            col_f3.metric(
+                "Estoque Total/Full (UN)", 
+                f"{int(est_full_un):,d}".replace(",", ".")
+            )
+            col_f4.metric(
+                "Estoque Total/Full (R$)", 
+                f"R$ {est_full_rs:,.2f}"
+            )
+
+            # Terceira Linha: Soma Total dos dois (O "Resumo do Resumo")
+            st.markdown("#### 🎯 Consolidação Final (Total do Inventário de Custos)")
+            
+            col_c1, col_c2 = st.columns(2)
+            col_c1.metric(
+                "SOMA TOTAL Unidades", 
+                f"{int(est_fis_un + est_full_un):,d}".replace(",", "."),
+                help="Soma das unidades Físicas e Full."
+            )
+            col_c2.metric(
+                "SOMA TOTAL R$", 
+                f"R$ {est_fis_rs + est_full_rs:,.2f}",
+                help="Soma dos valores Físicos e Full."
+            )
+            
+            st.markdown("---")
+        # --- FIM DO NOVO BLOCO ---
+
+
         fc1, fc2 = st.columns(2)
         sku_filt = fc1.text_input("Filtro SKU", key="f_sku", on_change=reset_selection).upper().strip()
         
@@ -496,63 +572,7 @@ with tab2:
                     st.session_state.pedido_ativo["empresa"] = empresas_sel[0]
                 st.session_state.pedido_ativo["itens"].extend(itens_to_add)
                 st.success(f"Sucesso! {len(itens_to_add)} novos itens no Editor.")
-# --- NOVO BLOCO: BALANÇO TOTAL DE ESTOQUE (Físico e Full) ---
 
-    # 1. Calcula o valor do estoque físico atual
-    df_resultado["Valor_Estoque_Fisico"] = df_resultado["Estoque_Fisico"] * df_resultado["Preco"]
-    
-    # 2. Define o "Estoque Full" (Físico + Compra Sugerida)
-    df_resultado["Estoque_Full"] = df_resultado["Estoque_Fisico"] + df_resultado["Compra_Sugerida"]
-    df_resultado["Valor_Estoque_Full"] = df_resultado["Estoque_Full"] * df_resultado["Preco"]
-    
-    # 3. Agrega os totais
-    est_fis_un = df_resultado["Estoque_Fisico"].sum()
-    est_fis_rs = df_resultado["Valor_Estoque_Fisico"].sum()
-    est_full_un = df_resultado["Estoque_Full"].sum()
-    est_full_rs = df_resultado["Valor_Estoque_Full"].sum()
-    
-    # --- EXIBIÇÃO DOS BALANÇOS ---
-    st.markdown("---")
-    st.subheader("💰 Balanço de Estoque (Valores e Unidades)")
-    
-    # Primeira Linha: Estoque Físico
-    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
-    
-    col_f1.metric(
-        "Estoque Físico (UN)", 
-        f"{int(est_fis_un):,d}".replace(",", ".")
-    )
-    col_f2.metric(
-        "Estoque Físico (R$)", 
-        f"R$ {est_fis_rs:,.2f}"
-    )
-
-    # Segunda Linha: Estoque Full (Físico + Compra Sugerida)
-    col_f3.metric(
-        "Estoque Total/Full (UN)", 
-        f"{int(est_full_un):,d}".replace(",", ".")
-    )
-    col_f4.metric(
-        "Estoque Total/Full (R$)", 
-        f"R$ {est_full_rs:,.2f}"
-    )
-
-    # Terceira Linha: Soma Total dos dois (O "Resumo do Resumo")
-    st.markdown("#### 🎯 Consolidação Final (Total do Inventário)")
-    
-    col_c1, col_c2 = st.columns(2)
-    col_c1.metric(
-        "SOMA TOTAL Unidades", 
-        f"{int(est_fis_un + est_full_un):,d}".replace(",", "."),
-        help="Soma das unidades Físicas e Full."
-    )
-    col_c2.metric(
-        "SOMA TOTAL R$", 
-        f"R$ {est_fis_rs + est_full_rs:,.2f}",
-        help="Soma dos valores Físicos e Full."
-    )
-    
-    st.markdown("---")
 
 # ---------- TAB 3: EDITOR DE OC ----------
 with tab3:
@@ -709,11 +729,11 @@ with tab4:
             return val
         
         df_view = df_filt[["ID", "Data", "Empresa", "Fornecedor", "Valor", "Status"]].copy()
-        df_view
+        st.dataframe(df_view.style.map(lambda x: 'background-color: #ffe0b2' if x == 'PENDENTE' else 'background-color: #c8e6c9', subset=['Status']), use_container_width=True)
+
+
 # ---------- TAB 5: ALOCAÇÃO DE CARGA (CALCULADORA DE RATEIO FINAL) ----------
 with tab5:
-    # IMPORTANTE: Requer que pd (pandas) já esteja importado no topo do arquivo.
-    
     st.header("⚖️ Alocação de Compra (SKU por SKU)")
     st.caption("Insira a quantidade comprada de um SKU e o sistema calcula a divisão ideal entre ALIVVIA e JCA.")
 
@@ -732,7 +752,7 @@ with tab5:
         df_j_clean = df_j[["SKU", "Vendas_Total_60d", "Preco"]].rename(columns={"Vendas_Total_60d": "Vendas_J"})
         
         # Faz o cruzamento total (Outer Join)
-        df_rateio_base = pd.merge(df_a_clean, df_j_clean, on="SKU", how="outer").fillna(0)
+        df_rateio_base = pd.merge(df_a_clean, df_j_clean, on="SKU", how="outer", suffixes=('_x', '_y')).fillna(0)
         df_rateio_base["Vendas_Total"] = df_rateio_base["Vendas_A"] + df_rateio_base["Vendas_J"]
         
         # Filtra apenas SKUs com algum histórico de venda (base de rateio)
@@ -781,6 +801,7 @@ with tab5:
         perc_jca = linha_sku["% JCA"] / 100
         
         # Obtém o preço unitário para o cálculo do valor
+        # Os sufixos _x e _y vieram do merge. Assume o primeiro preço disponível.
         preco_alv = linha_sku['Preco_x'] if linha_sku['Preco_x'] > 0 else linha_sku['Preco_y']
         preco_jca = linha_sku['Preco_y'] if linha_sku['Preco_y'] > 0 else linha_sku['Preco_x']
         
