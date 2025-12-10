@@ -41,14 +41,15 @@ st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide
 def check_password():
     """Retorna True se o usuário logou corretamente."""
     def password_entered():
-        # Corrigido o erro de KeyError: 'password'
+        # CORREÇÃO: Verifica se a chave existe antes de usar, prevenindo KeyError.
         if "password" in st.session_state:
             if st.session_state["password"] == st.secrets["access"]["password"]:
                 st.session_state["password_correct"] = True
-                del st.session_state["password"] # O delete foi mantido, mas a verificação impede a quebra
+                del st.session_state["password"]
             else:
                 st.session_state["password_correct"] = False
-        # else: st.session_state["password_correct"] = False # Não precisa disso, o default já é False
+        else:
+            st.session_state["password_correct"] = False
 
     if "password_correct" not in st.session_state:
         st.text_input("🔒 Digite a Senha de Acesso:", type="password", on_change=password_entered, key="password")
@@ -119,6 +120,7 @@ def gerar_curva_abc(df_resultado):
     return df[cols_finais]
 
 def _ensure_state():
+    # CORREÇÃO: Ajustada a leitura do arquivo local para usar o objeto f_bin corretamente.
     st.session_state.setdefault("catalogo_df", None)
     st.session_state.setdefault("kits_df", None)
     st.session_state.setdefault("loaded_at", None)
@@ -143,7 +145,7 @@ def _ensure_state():
                 path_name = get_local_name_path(emp, file_type)
                 if os.path.exists(path_bin) and os.path.exists(path_name):
                     try:
-                        with open(path_bin, 'rb') as f_bin: state["bytes"] = f.read()
+                        with open(path_bin, 'rb') as f_bin: state["bytes"] = f_bin.read()
                         with open(path_name, 'r', encoding='utf-8') as f_name: state["name"] = f_name.read().strip()
                         state['is_cached'] = True
                     except: state["name"] = None; state["bytes"] = None
@@ -429,7 +431,7 @@ with tab2:
                 )
         st.write("---")
 
-        # --- BALANÇO DE ESTOQUE (CORRIGIDO PARA O FLUXO INFORMATIVO) ---
+        # --- BALANÇO DE ESTOQUE (INFORMATIVO) ---
         
         st.subheader("💰 Balanço de Estoque (Valores e Unidades) - Informativo")
 
@@ -448,7 +450,7 @@ with tab2:
             # 1. Calcula o valor do estoque físico
             df_total["Valor_Estoque_Fisico"] = df_total["Estoque_Fisico"] * df_total["Preco"]
             
-            # 2. Define o valor do Estoque Full (Usa o Estoque_Full já explodido pela lógica)
+            # 2. Define o valor do Estoque Full (USA O VALOR JÁ EXPLODIDO E CORRIGIDO DE logic.py)
             df_total["Estoque_Full_Calculado"] = df_total["Estoque_Full"]
             df_total["Valor_Estoque_Full"] = df_total["Estoque_Full_Calculado"] * df_total["Preco"]
             

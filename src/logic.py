@@ -149,10 +149,12 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     base["Estoque_Fisico"] = base["Estoque_Fisico"].fillna(0).astype(int)
     base["Preco"] = base["Preco"].fillna(0.0)
     
+    # Puxa o Estoque Full Original
     full_simple = full[["SKU", "Estoque_Full", "Em_Transito"]].copy()
     base = base.merge(full_simple, on="SKU", how="left", suffixes=('_base', '_full'))
     
-    base["Estoque_Full_Original"] = base["Estoque_Full"].fillna(0).astype(int) # Guarda o valor original
+    # Armazena o valor original para a explosão
+    base["Estoque_Full_Original"] = base["Estoque_Full"].fillna(0).astype(int) 
     base["Em_Transito"] = base["Em_Transito"].fillna(0).astype(int) 
     base = base.drop(columns=[col for col in base.columns if col.endswith('_full') or col.endswith('_base')], errors='ignore')
 
@@ -179,16 +181,17 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     
     
     # ----------------------------------------------------
-    # CORREÇÃO CRÍTICA (EXPLOSÃO DO ESTOQUE FULL PARA INFORMAÇÃO)
+    # CORREÇÃO CRÍTICA (EXPLOSÃO DO ESTOQUE FULL PARA INFORMAÇÃO CORRETA)
     # ----------------------------------------------------
+    # Explode o Estoque Full Original (que contém SKUs de Kit) em Componentes
     full_stock_comp = explodir_por_kits(
         full[["SKU","Estoque_Full_Original"]].rename(columns={"SKU":"kit_sku","Estoque_Full_Original":"Qtd"}),
         kits,"kit_sku","Qtd").rename(columns={"Quantidade":"Estoque_Full_Componente"})
 
-    # Injeta o estoque FULL explodido (o valor REAL) de volta na base
-    base = base.merge(full_stock_comp[["SKU", "Estoque_Full_Componente"]], on="SKU", how="left", suffixes=('_base', '_comp')).fillna(0)
+    # Injeta o estoque FULL explodido (o valor REAL em componentes) de volta na base
+    base = base.merge(full_stock_comp[["SKU", "Estoque_Full_Componente"]], on="SKU", how="left").fillna(0)
     
-    # Agora a coluna Estoque_Full (que aparece na tela) usa o valor CORRETO explodido
+    # A coluna Estoque_Full na tabela final AGORA usa o valor CORRETO explodido
     base["Estoque_Full"] = base["Estoque_Full_Componente"].astype(int)
     # ----------------------------------------------------
     
@@ -196,7 +199,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     df_final = base[[
         "SKU","fornecedor",
         "Vendas_Total_60d",
-        "Estoque_Full", # <--- ESTE É O VALOR EXPLODIDO CORRETO
+        "Estoque_Full", 
         "Estoque_Fisico","Preco","Compra_Sugerida","Valor_Compra_R$",
         "ML_60d","Shopee_60d","TOTAL_60d","Reserva_30d","Folga_Fisico","Necessidade", "Em_Transito"
     ]].reset_index(drop=True)
@@ -207,7 +210,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     full_stock_kit_valor = full_stock_comp.merge(fis[["SKU","Preco"]], on="SKU", how="left")
     full_stock_kit_valor["Valor"] = full_stock_kit_valor["Estoque_Full_Componente"] * full_stock_kit_valor["Preco"].fillna(0.0)
     
-    full_unid  = int(full["Estoque_Full"].sum())
+    full_unid  = int(full["Estoque_Full_Original"].sum()) # Usamos o total de Kits para essa métrica
     full_valor = float(full_stock_kit_valor["Valor"].sum())
 
     painel = {"full_unid": full_unid, "full_valor": full_valor, "fisico_unid": fis_unid, "fisico_valor": fisico_valor}
