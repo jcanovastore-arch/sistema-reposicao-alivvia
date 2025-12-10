@@ -862,4 +862,4 @@ with tab5:
             "📦 Enviar para JCA", 
             f"{qtd_jca} Unidades", 
             delta=f"Total: R$ {valor_jca:,.2f}"
-        )F
+        )
