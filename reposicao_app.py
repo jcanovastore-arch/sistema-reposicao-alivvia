@@ -430,24 +430,26 @@ with tab2:
                 )
         st.write("---")
 
-        # --- NOVO BLOCO: BALANÇO TOTAL DE ESTOQUE (Físico e Full) ---
+        # --- CORREÇÃO: BALANÇO DE ESTOQUE POR EMPRESA ---
         
-        # Consolida os resultados da Alivvia e JCA para o Balanço
-        df_balanco_A = st.session_state.get("resultado_ALIVVIA")
-        df_balanco_J = st.session_state.get("resultado_JCA")
+        st.subheader("💰 Balanço de Estoque (Valores e Unidades)")
         
-        if df_balanco_A is not None and df_balanco_J is not None:
-            # Junta os dois DataFrames para calcular o Balanço Total da Companhia
-            df_total = pd.concat([
-                df_balanco_A.assign(Empresa="ALIVVIA"), 
-                df_balanco_J.assign(Empresa="JCA")
-            ])
+        # 1. Seletor de Empresa para Balanço
+        empresa_balanco = st.selectbox(
+            "Visualizar Balanço de:", 
+            ["ALIVVIA", "JCA"], 
+            key="balanco_emp_sel"
+        )
+        
+        df_balanco = st.session_state.get(f"resultado_{empresa_balanco}")
+        
+        if df_balanco is not None:
+            df_total = df_balanco.copy()
             
-            # 1. Calcula o valor do estoque físico atual
+            # 1. Recalcula o valor do estoque físico (segurança)
             df_total["Valor_Estoque_Fisico"] = df_total["Estoque_Fisico"] * df_total["Preco"]
             
-            # 2. Define o "Estoque Full" (Físico + Compra Sugerida)
-            # O Estoque_Full já deve vir calculado, mas vamos garantir que o Valor também esteja.
+            # 2. Define o valor do Estoque Full (Físico + Compra Sugerida)
             df_total["Estoque_Full_Calculado"] = df_total["Estoque_Fisico"] + df_total["Compra_Sugerida"]
             df_total["Valor_Estoque_Full"] = df_total["Estoque_Full_Calculado"] * df_total["Preco"]
             
@@ -459,7 +461,6 @@ with tab2:
             
             # --- EXIBIÇÃO DOS BALANÇOS ---
             st.markdown("---")
-            st.subheader("💰 Balanço de Estoque TOTAL (Valores e Unidades)")
             
             # Primeira Linha: Estoque Físico
             col_f1, col_f2, col_f3, col_f4 = st.columns(4)
@@ -473,7 +474,7 @@ with tab2:
                 f"R$ {est_fis_rs:,.2f}"
             )
 
-            # Segunda Linha: Estoque Full (Físico + Compra Sugerida)
+            # Segunda Linha: Estoque Total (Físico + Compra Sugerida)
             col_f3.metric(
                 "Estoque Total/Full (UN)", 
                 f"{int(est_full_un):,d}".replace(",", ".")
@@ -483,7 +484,7 @@ with tab2:
                 f"R$ {est_full_rs:,.2f}"
             )
 
-            # Terceira Linha: Soma Total dos dois (O "Resumo do Resumo")
+            # Terceira Linha: Consolidação (Soma Física + Full para o Inventário)
             st.markdown("#### 🎯 Consolidação Final (Total do Inventário de Custos)")
             
             col_c1, col_c2 = st.columns(2)
@@ -497,9 +498,11 @@ with tab2:
                 f"R$ {est_fis_rs + est_full_rs:,.2f}",
                 help="Soma dos valores Físicos e Full."
             )
-            
             st.markdown("---")
-        # --- FIM DO NOVO BLOCO ---
+            
+        else:
+             st.info(f"Calcule os dados da {empresa_balanco} primeiro para ver o balanço.")
+        # --- FIM DA CORREÇÃO DO BALANÇO ---
 
 
         fc1, fc2 = st.columns(2)
@@ -859,4 +862,4 @@ with tab5:
             "📦 Enviar para JCA", 
             f"{qtd_jca} Unidades", 
             delta=f"Total: R$ {valor_jca:,.2f}"
-        )
+        )F
