@@ -45,11 +45,10 @@ def check_password():
         if "password" in st.session_state:
             if st.session_state["password"] == st.secrets["access"]["password"]:
                 st.session_state["password_correct"] = True
-                del st.session_state["password"]
+                del st.session_state["password"] # O delete foi mantido, mas a verificação impede a quebra
             else:
                 st.session_state["password_correct"] = False
-        else:
-            st.session_state["password_correct"] = False
+        # else: st.session_state["password_correct"] = False # Não precisa disso, o default já é False
 
     if "password_correct" not in st.session_state:
         st.text_input("🔒 Digite a Senha de Acesso:", type="password", on_change=password_entered, key="password")
@@ -144,7 +143,7 @@ def _ensure_state():
                 path_name = get_local_name_path(emp, file_type)
                 if os.path.exists(path_bin) and os.path.exists(path_name):
                     try:
-                        with open(path_bin, 'rb') as f_bin: state["bytes"] = f_bin.read()
+                        with open(path_bin, 'rb') as f_bin: state["bytes"] = f.read()
                         with open(path_name, 'r', encoding='utf-8') as f_name: state["name"] = f_name.read().strip()
                         state['is_cached'] = True
                     except: state["name"] = None; state["bytes"] = None
@@ -430,27 +429,27 @@ with tab2:
                 )
         st.write("---")
 
-        # --- CORREÇÃO: BALANÇO DE ESTOQUE POR EMPRESA ---
+        # --- BALANÇO DE ESTOQUE (CORRIGIDO PARA O FLUXO INFORMATIVO) ---
         
-        st.subheader("💰 Balanço de Estoque (Valores e Unidades)")
-        
-        # 1. Seletor de Empresa para Balanço
-        empresa_balanco = st.selectbox(
-            "Visualizar Balanço de:", 
+        st.subheader("💰 Balanço de Estoque (Valores e Unidades) - Informativo")
+
+        # Seletor para ver o Balanço da Empresa
+        balanco_empresa = st.selectbox(
+            "Ver Balanço da Empresa:", 
             ["ALIVVIA", "JCA"], 
-            key="balanco_emp_sel"
+            key="balanco_info_emp"
         )
         
-        df_balanco = st.session_state.get(f"resultado_{empresa_balanco}")
+        df_balanco = st.session_state.get(f"resultado_{balanco_empresa}")
         
         if df_balanco is not None:
             df_total = df_balanco.copy()
             
-            # 1. Recalcula o valor do estoque físico (segurança)
+            # 1. Calcula o valor do estoque físico
             df_total["Valor_Estoque_Fisico"] = df_total["Estoque_Fisico"] * df_total["Preco"]
             
-            # 2. Define o valor do Estoque Full (Físico + Compra Sugerida)
-            df_total["Estoque_Full_Calculado"] = df_total["Estoque_Fisico"] + df_total["Compra_Sugerida"]
+            # 2. Define o valor do Estoque Full (Usa o Estoque_Full já explodido pela lógica)
+            df_total["Estoque_Full_Calculado"] = df_total["Estoque_Full"]
             df_total["Valor_Estoque_Full"] = df_total["Estoque_Full_Calculado"] * df_total["Preco"]
             
             # 3. Agrega os totais
@@ -459,10 +458,7 @@ with tab2:
             est_full_un = df_total["Estoque_Full_Calculado"].sum()
             est_full_rs = df_total["Valor_Estoque_Full"].sum()
             
-            # --- EXIBIÇÃO DOS BALANÇOS ---
-            st.markdown("---")
-            
-            # Primeira Linha: Estoque Físico
+            # --- EXIBIÇÃO SIMPLES ---
             col_f1, col_f2, col_f3, col_f4 = st.columns(4)
             
             col_f1.metric(
@@ -474,7 +470,6 @@ with tab2:
                 f"R$ {est_fis_rs:,.2f}"
             )
 
-            # Segunda Linha: Estoque Total (Físico + Compra Sugerida)
             col_f3.metric(
                 "Estoque Total/Full (UN)", 
                 f"{int(est_full_un):,d}".replace(",", ".")
@@ -484,7 +479,7 @@ with tab2:
                 f"R$ {est_full_rs:,.2f}"
             )
 
-            # Terceira Linha: Consolidação (Soma Física + Full para o Inventário)
+            # Consolidação Final (Soma Total)
             st.markdown("#### 🎯 Consolidação Final (Total do Inventário de Custos)")
             
             col_c1, col_c2 = st.columns(2)
@@ -501,8 +496,8 @@ with tab2:
             st.markdown("---")
             
         else:
-             st.info(f"Calcule os dados da {empresa_balanco} primeiro para ver o balanço.")
-        # --- FIM DA CORREÇÃO DO BALANÇO ---
+             st.info(f"Calcule os dados da {balanco_empresa} primeiro para ver o balanço.")
+        # --- FIM DO BLOCO DE BALANÇO ---
 
 
         fc1, fc2 = st.columns(2)
@@ -746,7 +741,7 @@ with tab5:
 
     if df_a is None or df_j is None:
         st.warning("⚠️ É necessário calcular as duas empresas (Alivvia e JCA) na aba 'Análise' primeiro.")
-        st.stop() # Para o script se os dados não existirem.
+        st.stop() 
 
     # --- PREPARAÇÃO DOS DADOS (Cálculo de Base) ---
     try:
@@ -774,7 +769,7 @@ with tab5:
 
     if not skus_disponiveis:
          st.info("Nenhum SKU tem histórico de vendas (Vendas 60d > 0) nas duas empresas para realizar o rateio.")
-         st.stop() # Para o script se não houver base de rateio.
+         st.stop()
          
     # --- UI DE RATEIO (O fluxo que você pediu) ---
     c1, c2 = st.columns([2, 1])
@@ -804,7 +799,6 @@ with tab5:
         perc_jca = linha_sku["% JCA"] / 100
         
         # Obtém o preço unitário para o cálculo do valor
-        # Os sufixos _x e _y vieram do merge. Assume o primeiro preço disponível.
         preco_alv = linha_sku['Preco_x'] if linha_sku['Preco_x'] > 0 else linha_sku['Preco_y']
         preco_jca = linha_sku['Preco_y'] if linha_sku['Preco_y'] > 0 else linha_sku['Preco_x']
         
