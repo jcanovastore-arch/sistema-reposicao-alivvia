@@ -149,7 +149,14 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     base["Estoque_Fisico"] = base["Estoque_Fisico"].fillna(0).astype(int)
     base["Preco"] = base["Preco"].fillna(0.0)
     
-    # Puxa o Estoque Full Original
+    # --- CORREÇÃO DE INICIALIZAÇÃO DE ESTOQUE FULL ORIGINAL (Fix Key Error) ---
+    
+    # Cria a coluna Estoque_Full e Em_Transito se não existirem (robustez extra)
+    if "Estoque_Full" not in full.columns:
+        full["Estoque_Full"] = 0
+    if "Em_Transito" not in full.columns:
+        full["Em_Transito"] = 0
+        
     full_simple = full[["SKU", "Estoque_Full", "Em_Transito"]].copy()
     base = base.merge(full_simple, on="SKU", how="left", suffixes=('_base', '_full'))
     
@@ -157,6 +164,9 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     base["Estoque_Full_Original"] = base["Estoque_Full"].fillna(0).astype(int) 
     base["Em_Transito"] = base["Em_Transito"].fillna(0).astype(int) 
     base = base.drop(columns=[col for col in base.columns if col.endswith('_full') or col.endswith('_base')], errors='ignore')
+    
+    # --- FIM DA CORREÇÃO ---
+
 
     fator = (1.0 + g/100.0) ** (h/30.0)
     fk = full.copy()
