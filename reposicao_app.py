@@ -496,6 +496,63 @@ with tab2:
                     st.session_state.pedido_ativo["empresa"] = empresas_sel[0]
                 st.session_state.pedido_ativo["itens"].extend(itens_to_add)
                 st.success(f"Sucesso! {len(itens_to_add)} novos itens no Editor.")
+# --- NOVO BLOCO: BALANÇO TOTAL DE ESTOQUE (Físico e Full) ---
+
+    # 1. Calcula o valor do estoque físico atual
+    df_resultado["Valor_Estoque_Fisico"] = df_resultado["Estoque_Fisico"] * df_resultado["Preco"]
+    
+    # 2. Define o "Estoque Full" (Físico + Compra Sugerida)
+    df_resultado["Estoque_Full"] = df_resultado["Estoque_Fisico"] + df_resultado["Compra_Sugerida"]
+    df_resultado["Valor_Estoque_Full"] = df_resultado["Estoque_Full"] * df_resultado["Preco"]
+    
+    # 3. Agrega os totais
+    est_fis_un = df_resultado["Estoque_Fisico"].sum()
+    est_fis_rs = df_resultado["Valor_Estoque_Fisico"].sum()
+    est_full_un = df_resultado["Estoque_Full"].sum()
+    est_full_rs = df_resultado["Valor_Estoque_Full"].sum()
+    
+    # --- EXIBIÇÃO DOS BALANÇOS ---
+    st.markdown("---")
+    st.subheader("💰 Balanço de Estoque (Valores e Unidades)")
+    
+    # Primeira Linha: Estoque Físico
+    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+    
+    col_f1.metric(
+        "Estoque Físico (UN)", 
+        f"{int(est_fis_un):,d}".replace(",", ".")
+    )
+    col_f2.metric(
+        "Estoque Físico (R$)", 
+        f"R$ {est_fis_rs:,.2f}"
+    )
+
+    # Segunda Linha: Estoque Full (Físico + Compra Sugerida)
+    col_f3.metric(
+        "Estoque Total/Full (UN)", 
+        f"{int(est_full_un):,d}".replace(",", ".")
+    )
+    col_f4.metric(
+        "Estoque Total/Full (R$)", 
+        f"R$ {est_full_rs:,.2f}"
+    )
+
+    # Terceira Linha: Soma Total dos dois (O "Resumo do Resumo")
+    st.markdown("#### 🎯 Consolidação Final (Total do Inventário)")
+    
+    col_c1, col_c2 = st.columns(2)
+    col_c1.metric(
+        "SOMA TOTAL Unidades", 
+        f"{int(est_fis_un + est_full_un):,d}".replace(",", "."),
+        help="Soma das unidades Físicas e Full."
+    )
+    col_c2.metric(
+        "SOMA TOTAL R$", 
+        f"R$ {est_fis_rs + est_full_rs:,.2f}",
+        help="Soma dos valores Físicos e Full."
+    )
+    
+    st.markdown("---")
 
 # ---------- TAB 3: EDITOR DE OC ----------
 with tab3:
