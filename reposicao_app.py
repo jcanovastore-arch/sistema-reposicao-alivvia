@@ -242,6 +242,30 @@ with tab2:
                 df = st.session_state[f"resultado_{emp}"].copy()
                 if sku_f: df = df[df["SKU"].str.contains(sku_f, na=False)]
                 
+                # CÓDIGO RESTAURADO: BALANÇO DE ESTOQUE E VALORES
+                if not df.empty and 'Estoque_Fisico' in df.columns and 'Estoque_Full' in df.columns and 'Preco' in df.columns:
+                    m1, m2, m3, m4 = st.columns(4)
+                    
+                    # Totais de Estoque
+                    tot_fis = df['Estoque_Fisico'].sum()
+                    tot_full = df['Estoque_Full'].sum()
+                    
+                    # Totais de Valor
+                    # Verifica se as colunas estão no tipo correto para multiplicação (float/int)
+                    df['Preco'] = pd.to_numeric(df['Preco'], errors='coerce').fillna(0)
+                    df['Estoque_Fisico'] = pd.to_numeric(df['Estoque_Fisico'], errors='coerce').fillna(0)
+                    df['Estoque_Full'] = pd.to_numeric(df['Estoque_Full'], errors='coerce').fillna(0)
+
+                    val_fis = (df['Estoque_Fisico'] * df['Preco']).sum()
+                    val_full = (df['Estoque_Full'] * df['Preco']).sum()
+
+                    m1.metric("Físico (Un)", format_br_int(tot_fis))
+                    m2.metric("Físico (R$)", format_br_currency(val_fis))
+                    m3.metric("Full (Un)", format_br_int(tot_full))
+                    m4.metric("Full (R$)", format_br_currency(val_full))
+                
+                # Fim do CÓDIGO RESTAURADO
+
                 k_sku = f"c_skus_{emp}"
                 st.session_state[k_sku] = df["SKU"].tolist()
                 sel = st.session_state[f"sel_{emp[0]}"]
@@ -250,7 +274,6 @@ with tab2:
                 cols = [c for c in ["Selecionar", "SKU", "fornecedor", "Vendas_Total_60d", "Estoque_Full", "Estoque_Fisico", "Preco", "Compra_Sugerida"] if c in df.columns]
                 st.data_editor(style_df_compra(df[cols]), key=f"ed_{emp}", use_container_width=True, hide_index=True, column_config={"Selecionar": st.column_config.CheckboxColumn(default=False)}, on_change=update_sel, args=(f"ed_{emp}", k_sku, sel))
                 if st.button(f"🛒 Add ao Pedido ({emp})", key=f"bt_{emp}"): add_to_cart(emp)
-
 # --- TAB 3: CRUZAMENTO PDF FULL (AGORA COM CUSTOS) ---
 with tab3:
     st.header("🚛 Cruzar PDF de Envio vs Estoque Físico")
