@@ -64,7 +64,12 @@ def add_to_cart(emp):
     c = 0
     for _, r in novos.iterrows():
         if r["SKU"] not in curr_skus:
-            curr.append({"sku": r["SKU"], "qtd": int(r["Compra_Sugerida"]), "valor_unit": float(r["Preco"]), "origem": emp})
+            # Se vier da aba Full (Necessidade), usa a Necessidade. Se vier da Compra, usa Compra_Sugerida
+            qtd = int(r["Compra_Sugerida"])
+            if "Necessidade" in r and r["Necessidade"] > 0 and qtd == 0:
+                 qtd = int(r["Necessidade"])
+
+            curr.append({"sku": r["SKU"], "qtd": qtd, "valor_unit": float(r["Preco"]), "origem": emp})
             c += 1
     st.session_state.pedido_ativo["itens"] = curr
     if not st.session_state.pedido_ativo["fornecedor"] and not novos.empty:
@@ -127,7 +132,8 @@ with st.sidebar:
 st.title("Reposição Logística — Alivvia (Estável)")
 if st.session_state.catalogo_df is None: st.warning("⚠️ Por favor, carregue o Padrão de Produtos no menu lateral (Google ou Upload).")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📂 Uploads", "🔍 Análise & Compra", "📝 Editor OC", "🗂️ Gestão", "📦 Alocação"])
+# ADICIONADA A ABA "FULL" NA LISTA DE TABS
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📂 Uploads", "🔍 Análise & Compra", "🚛 Full", "📝 Editor OC", "🗂️ Gestão", "📦 Alocação"])
 
 # --- TAB 1: UPLOADS (COM BOTÃO DE LIMPEZA) ---
 with tab1:
@@ -233,8 +239,49 @@ with tab2:
                 if st.button(f"🛒 Enviar Selecionados ({emp}) para Editor", key=f"bt_{emp}"): 
                     add_to_cart(emp)
 
-# --- TAB 3: EDITOR ---
+# --- TAB 3: ABA FULL (RESTAURADA) ---
 with tab3:
+    st.header("🚛 Abastecimento Full (Sugestão de Envio)")
+    
+    emp_full = st.radio("Selecione a Empresa:", ["ALIVVIA", "JCA"], horizontal=True)
+    df_res = st.session_state.get(f"resultado_{emp_full}")
+    
+    if df_res is None:
+        st.info("Calcule primeiro na aba 'Análise & Compra'.")
+    else:
+        # Filtros básicos da aba Full
+        apenas_envio = st.checkbox("Mostrar apenas itens com Envio Sugerido > 0", value=True)
+        
+        df_full_view = df_res.copy()
+        
+        if "Necessidade" not in df_full_view.columns:
+            st.error("Coluna 'Necessidade' não encontrada. Verifique o cálculo.")
+        else:
+            if apenas_envio:
+                df_full_view = df_full_view[df_full_view["Necessidade"] > 0]
+            
+            # Colunas relevantes para Full
+            cols_full = ["SKU", "fornecedor", "Vendas_Total_60d", "Estoque_Full", "Em_Transito", "Necessidade", "Estoque_Fisico"]
+            
+            # Métricas rápidas
+            c_f1, c_f2, c_f3 = st.columns(3)
+            c_f1.metric("Itens a Enviar", len(df_full_view))
+            c_f2.metric("Quantidade Total Envio", int(df_full_view["Necessidade"].sum()))
+            
+            # Exibição
+            st.dataframe(
+                df_full_view[cols_full].style.background_gradient(subset=["Necessidade"], cmap="Greens"),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Necessidade": st.column_config.NumberColumn("Sugestão Envio", help="Quantidade sugerida para enviar ao Full"),
+                    "Estoque_Full": st.column_config.NumberColumn("Estoque Full Atual"),
+                    "Em_Transito": st.column_config.NumberColumn("Em Trânsito")
+                }
+            )
+
+# --- TAB 4: EDITOR ---
+with tab4:
     st.header("📝 Editor de Ordem de Compra")
     ped = st.session_state.pedido_ativo
     c1, c2, c3 = st.columns(3)
@@ -257,8 +304,8 @@ with tab3:
         if st.button("🗑️ Limpar"): st.session_state.pedido_ativo["itens"] = []; st.rerun()
     else: st.info("Carrinho vazio.")
 
-# --- TAB 4: GESTÃO ---
-with tab4:
+# --- TAB 5: GESTÃO ---
+with tab5:
     st.header("🗂️ Gestão de OCs")
     if st.button("🔄 Atualizar Lista"): st.rerun()
     df_ocs = listar_pedidos()
@@ -278,8 +325,8 @@ with tab4:
             
             if st.button("Excluir"): excluir_pedido_db(sel_oc); st.warning("Excluído"); time.sleep(1); st.rerun()
 
-# --- TAB 5: ALOCAÇÃO (Simplificada) ---
-with tab5:
+# --- TAB 6: ALOCAÇÃO (Simplificada) ---
+with tab6:
     st.header("📦 Alocação de Compra (JCA vs ALIVVIA)")
     
     ra = st.session_state.get("resultado_ALIVVIA")
