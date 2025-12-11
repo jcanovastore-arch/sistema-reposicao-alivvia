@@ -41,75 +41,130 @@ def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_co
     return out
 
 def mapear_tipo(df: pd.DataFrame) -> str:
-    cols = [c.lower() for c in df.columns]
-    tem_sku_std  = any(c in {"sku","codigo","codigo_sku"} for c in cols) or any("sku" in c for c in cols)
-    tem_vendas60 = any(c.startswith("vendas_60d") or c in {"vendas 60d","vendas_qtd_60d"} for c in cols)
+    # Normalização prévia dos headers para identificação do tipo
+    cols = [str(c).lower().strip().replace(" ", "_") for c in df.columns]
+    
+    tem_sku_std  = any(c in {"sku","codigo","codigo_sku","codigo_(sku)"} for c in cols) or any("sku" in c for c in cols)
+    
+    tem_vendas60 = any("vendas" in c and "60" in c for c in cols)
     tem_qtd_livre= any(("qtde" in c) or ("quant" in c) or ("venda" in c) or ("order" in c) for c in cols)
-    tem_estoque_full_like = any(("estoque" in c and "full" in c) or c=="estoque_full" for c in cols)
-    tem_estoque_generico  = any(c in {"estoque_atual","qtd","quantidade"} or "estoque" in c for c in cols)
-    tem_transito_like     = any(("transito" in c) or c in {"em_transito","em transito","em_transito_full","em_transito_do_anuncio"} for c in cols)
+    
+    tem_estoque_full_like = any(("estoque" in c and "full" in c) for c in cols)
+    
+    # Detecção robusta para o arquivo de ESTOQUE FÍSICO
+    # Se tiver "estoque_atual" e "preco" ou "un", é físico
+    tem_estoque_atual = any(c in {"estoque_atual", "estoque_fisico"} for c in cols)
     tem_preco = any(c in {"preco","preco_compra","preco_medio","custo","custo_medio"} for c in cols)
 
-    if tem_sku_std and (tem_vendas60 or tem_estoque_full_like or tem_transito_like): return "FULL"
+    if tem_sku_std and (tem_vendas60 or tem_estoque_full_like): return "FULL"
     if tem_sku_std and tem_vendas60 and tem_qtd_livre: return "FULL"
-    if tem_sku_std and tem_estoque_generico and tem_preco: return "FISICO"
+    if tem_sku_std and tem_estoque_atual and tem_preco: return "FISICO"
     if tem_sku_std and tem_qtd_livre and not tem_preco: return "VENDAS"
+    
+    # Fallback
     return "DESCONHECIDO"
 
 def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
+    df = df.copy()
+    
+    # --- LIMPEZA DOS CABEÇALHOS (GARANTIA DE LEITURA) ---
+    # Transforma "Estoque atual" em "estoque_atual", "Código (SKU)" em "codigo_sku", etc.
+    df.columns = [
+        str(c).lower().strip()
+        .replace(" ", "_")
+        .replace("(", "")
+        .replace(")", "")
+        .replace(".", "")
+        for c in df.columns
+    ]
+    
+    # Função auxiliar para limpar números (1.000,00 -> 1000.00) dentro desta função
+    def clean_num(x):
+        if isinstance(x, (int, float)): return x
+        if pd.isna(x) or str(x).strip() == '': return 0
+        return br_to_float(x)
+
+    # Identificação da Coluna de SKU
+    col_sku = None
+    possiveis_sku = ["sku", "codigo", "codigo_sku", "id"]
+    for cand in possiveis_sku:
+        if cand in df.columns:
+            col_sku = cand
+            break
+    if not col_sku:
+        # Tenta achar algo que contenha sku
+        for c in df.columns:
+            if "sku" in c:
+                col_sku = c
+                break
+    
+    if not col_sku:
+        raise RuntimeError(f"Coluna de SKU não encontrada. Colunas lidas: {list(df.columns)}")
+    
+    df["SKU"] = df[col_sku].map(norm_sku)
+
+    # --- MAPEAMENTO POR TIPO ---
     if tipo == "FULL":
-        if "sku" in df.columns: df["SKU"] = df["sku"].map(norm_sku)
-        elif "codigo" in df.columns: df["SKU"] = df["codigo"].map(norm_sku)
-        elif "codigo_sku" in df.columns: df["SKU"] = df["codigo_sku"].map(norm_sku)
-        else: raise RuntimeError("FULL inválido: precisa de coluna SKU/codigo.")
+        # Busca Vendas
+        c_v = [c for c in df.columns if "vendas" in c and "60" in c]
+        if not c_v: raise RuntimeError("FULL: Faltou coluna de Vendas 60d.")
+        df["Vendas_Qtd_60d"] = df[c_v[0]].map(clean_num).fillna(0).astype(int)
 
-        c_v = [c for c in df.columns if c in ["vendas_qtd_60d","vendas_60d","vendas 60d"] or c.startswith("vendas_60d")]
-        if not c_v: raise RuntimeError("FULL inválido: faltou Vendas_60d.")
-        df["Vendas_Qtd_60d"] = df[c_v[0]].map(br_to_float).fillna(0).astype(int)
+        # Busca Estoque Full
+        c_e = [c for c in df.columns if "estoque" in c and "full" in c]
+        # Fallback se não achar "full" no nome mas for do tipo FULL
+        if not c_e: c_e = [c for c in df.columns if "estoque" in c]
+        
+        if not c_e: raise RuntimeError("FULL: Faltou coluna de Estoque Full.")
+        df["Estoque_Full"] = df[c_e[0]].map(clean_num).fillna(0).astype(int)
 
-        c_e = [c for c in df.columns if c in ["estoque_full","estoque_atual"] or ("estoque" in c and "full" in c)]
-        if not c_e: raise RuntimeError("FULL inválido: faltou Estoque_Full/estoque_atual.")
-        df["Estoque_Full"] = df[c_e[0]].map(br_to_float).fillna(0).astype(int)
-
-        c_t = [c for c in df.columns if c in ["em_transito","em transito","em_transito_full","em_transito_do_anuncio"] or ("transito" in c)]
-        df["Em_Transito"] = df[c_t[0]].map(br_to_float).fillna(0).astype(int) if c_t else 0 
+        # Busca Em Transito
+        c_t = [c for c in df.columns if "transito" in c]
+        df["Em_Transito"] = df[c_t[0]].map(clean_num).fillna(0).astype(int) if c_t else 0 
 
         return df[["SKU","Vendas_Qtd_60d","Estoque_Full","Em_Transito"]].copy()
 
     if tipo == "FISICO":
-        sku_series = (df["sku"] if "sku" in df.columns else (df["codigo"] if "codigo" in df.columns else (df["codigo_sku"] if "codigo_sku" in df.columns else None)))
-        if sku_series is None:
-            cand = next((c for c in df.columns if "sku" in c.lower()), None)
-            if cand is None: raise RuntimeError("FÍSICO inválido: não achei coluna de SKU.")
-            sku_series = df[cand]
-        df["SKU"] = sku_series.map(norm_sku)
+        # Busca Estoque Físico (Prioridade: estoque_atual > estoque_disponivel > estoque)
+        col_estoque = None
+        if "estoque_atual" in df.columns: col_estoque = "estoque_atual"
+        elif "estoque_disponivel" in df.columns: col_estoque = "estoque_disponivel"
+        else:
+            c_q = [c for c in df.columns if "estoque" in c or "qtd" in c or "quant" in c]
+            if c_q: col_estoque = c_q[0]
 
-        c_q = [c for c in df.columns if c in ["estoque_atual","qtd","quantidade"] or ("estoque" in c)]
-        if not c_q: raise RuntimeError("FÍSICO inválido: faltou Estoque.")
-        df["Estoque_Fisico"] = df[c_q[0]].map(br_to_float).fillna(0).astype(int)
+        if not col_estoque: raise RuntimeError(f"FÍSICO: Faltou coluna de Estoque. Colunas: {list(df.columns)}")
+        df["Estoque_Fisico"] = df[col_estoque].map(clean_num).fillna(0).astype(int)
 
-        c_p = [c for c in df.columns if c in ["preco","preco_compra","custo","custo_medio","preco_medio","preco_unitario"]]
-        if not c_p: raise RuntimeError("FÍSICO inválido: faltou Preço/Custo.")
-        df["Preco"] = df[c_p[0]].map(br_to_float).fillna(0.0)
+        # Busca Preço
+        col_preco = None
+        possiveis_preco = ["preco", "preco_compra", "custo", "custo_medio", "valor", "preco_unitario"]
+        for cand in possiveis_preco:
+            if cand in df.columns:
+                col_preco = cand
+                break
+        if not col_preco: raise RuntimeError("FÍSICO: Faltou coluna de Preço.")
+        df["Preco"] = df[col_preco].map(clean_num).fillna(0.0)
+        
         return df[["SKU","Estoque_Fisico","Preco"]].copy()
 
     if tipo == "VENDAS":
-        sku_col = next((c for c in df.columns if "sku" in c.lower()), None)
-        if sku_col is None: raise RuntimeError("VENDAS inválido: não achei coluna de SKU.")
-        df["SKU"] = df[sku_col].map(norm_sku)
-
-        cand_qty = []
-        for c in df.columns:
-            cl = c.lower(); score = 0
-            if "qtde" in cl: score += 3
-            if "quant" in cl: score += 2
-            if "venda" in cl: score += 1
-            if "order" in cl: score += 1
-            if score > 0: cand_qty.append((score, c))
-        if not cand_qty: raise RuntimeError("VENDAS inválido: não achei coluna de Quantidade.")
-        cand_qty.sort(reverse=True)
-        qcol = cand_qty[0][1]
-        df["Quantidade"] = df[qcol].map(br_to_float).fillna(0).astype(int)
+        # Busca Quantidade
+        col_qty = None
+        possiveis_qty = ["quantidade", "qtd", "qtde", "vendas"]
+        for cand in possiveis_qty:
+            if cand in df.columns:
+                col_qty = cand
+                break
+        if not col_qty: 
+             # Tenta achar substring
+             for c in df.columns:
+                 if "quant" in c or "qtd" in c:
+                     col_qty = c
+                     break
+        
+        if not col_qty: raise RuntimeError("VENDAS: Faltou coluna de Quantidade.")
+        df["Quantidade"] = df[col_qty].map(clean_num).fillna(0).astype(int)
         return df[["SKU","Quantidade"]].copy()
 
     raise RuntimeError("Tipo de arquivo desconhecido.")
@@ -122,7 +177,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     full["Estoque_Full"]   = full["Estoque_Full"].astype(int)
     full["Em_Transito"]    = full["Em_Transito"].astype(int) 
 
-    # --- CORREÇÃO CRÍTICA DO KEYERROR: Garantindo que a coluna de backup exista no FULL ---
+    # --- GARANTIA: Backup do Estoque Full para explosão ---
     full["Estoque_Full_Original"] = full["Estoque_Full"].copy()
     
     shp = vendas_df.copy()
@@ -152,16 +207,15 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     base["Estoque_Fisico"] = base["Estoque_Fisico"].fillna(0).astype(int)
     base["Preco"] = base["Preco"].fillna(0.0)
     
-    # Puxa o Estoque Full Original e Em_Transito para o DataFrame base
+    # Merge com Full Info
     full_simple = full[["SKU", "Estoque_Full", "Em_Transito", "Estoque_Full_Original"]].copy()
     base = base.merge(full_simple, on="SKU", how="left", suffixes=('_base', '_full'))
     
-    # Puxa os valores para base, garantindo que o Estoque_Full original não é perdido
+    # Limpeza pós-merge
     base["Estoque_Full_Original"] = base["Estoque_Full_Original"].fillna(0).astype(int) 
     base["Estoque_Full"] = base["Estoque_Full"].fillna(0).astype(int) 
     base["Em_Transito"] = base["Em_Transito"].fillna(0).astype(int) 
     base = base.drop(columns=[col for col in base.columns if col.endswith('_full') or col.endswith('_base')], errors='ignore')
-
 
     fator = (1.0 + g/100.0) ** (h/30.0)
     fk = full.copy()
@@ -184,22 +238,13 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     base["Compra_Sugerida"] = (base["Necessidade"] - base["Folga_Fisico"]).clip(lower=0).astype(int)
     base["Valor_Compra_R$"] = (base["Compra_Sugerida"].astype(float) * base["Preco"].astype(float)).round(2)
     
-    
-    # ----------------------------------------------------
-    # CORREÇÃO CRÍTICA (EXPLOSÃO DO ESTOQUE FULL PARA INFORMAÇÃO CORRETA)
-    # ----------------------------------------------------
-    # Explode o Estoque Full Original (que contém SKUs de Kit) em Componentes
+    # --- EXPLOSÃO INFORMATIVA DO FULL ---
     full_stock_comp = explodir_por_kits(
         full[["SKU","Estoque_Full_Original"]].rename(columns={"SKU":"kit_sku","Estoque_Full_Original":"Qtd"}),
         kits,"kit_sku","Qtd").rename(columns={"Quantidade":"Estoque_Full_Componente"})
 
-    # Injeta o estoque FULL explodido (o valor REAL em componentes) de volta na base
     base = base.merge(full_stock_comp[["SKU", "Estoque_Full_Componente"]], on="SKU", how="left").fillna(0)
-    
-    # A coluna Estoque_Full na tabela final AGORA usa o valor CORRETO explodido
     base["Estoque_Full"] = base["Estoque_Full_Componente"].astype(int)
-    # ----------------------------------------------------
-    
     
     df_final = base[[
         "SKU","fornecedor",
@@ -215,7 +260,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     full_stock_kit_valor = full_stock_comp.merge(fis[["SKU","Preco"]], on="SKU", how="left")
     full_stock_kit_valor["Valor"] = full_stock_kit_valor["Estoque_Full_Componente"] * full_stock_kit_valor["Preco"].fillna(0.0)
     
-    full_unid  = int(full["Estoque_Full_Original"].sum()) # Usamos o total de Kits para essa métrica
+    full_unid  = int(full["Estoque_Full_Original"].sum()) 
     full_valor = float(full_stock_kit_valor["Valor"].sum())
 
     painel = {"full_unid": full_unid, "full_valor": full_valor, "fisico_unid": fis_unid, "fisico_valor": fisico_valor}
