@@ -12,7 +12,6 @@ from typing import Optional, Tuple
 # Imports internos
 from src.config import DEFAULT_SHEET_LINK
 # format_br_int é necessário para formatar os valores inteiros corretamente
-# CRÍTICO: Importar format_br_int e format_br_currency
 from src.utils import style_df_compra, norm_sku, format_br_currency, format_br_int 
 # _carregar_padrao_de_content é necessária para o upload manual de planilha
 from src.data import get_local_file_path, get_local_name_path, load_any_table_from_bytes, carregar_padrao_local_ou_sheets, _carregar_padrao_de_content
@@ -186,6 +185,13 @@ def clear_file_cache(empresa, tipo):
         time.sleep(1)
         st.rerun()
 
+# 🛑 NOVA FUNÇÃO: Resetar o Catálogo Mestre (Limpa a sessão)
+def reset_master_data():
+    st.session_state.catalogo_df = None
+    st.session_state.kits_df = None
+    st.toast("Dados Mestre (Catálogo e Kits) limpos! Recarregue-os.", icon="🧹")
+    # Não precisa de st.rerun() pois o st.button já vai forçar um rerun após o on_click
+
 # ===================== SIDEBAR =====================
 with st.sidebar:
     st.header("⚙️ Parâmetros")
@@ -218,6 +224,11 @@ with st.sidebar:
             st.success("✅ Arquivo carregado manualmente!")
         except Exception as e:
             st.error(f"Erro no arquivo: {e}")
+
+    st.divider()
+    # 🛑 NOVO BOTÃO DE LIMPEZA DO CATÁLOGO
+    if st.button("🧹 Limpar Dados Mestre (Catálogo/Kits)", type="secondary", on_click=reset_master_data):
+        pass # A função on_click já executa o reset e o toast
 
 st.title("Reposição Logística — Alivvia")
 if st.session_state.catalogo_df is None: st.warning("⚠️ Carregue o Padrão de Produtos no menu lateral.")
