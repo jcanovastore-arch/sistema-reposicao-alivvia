@@ -5,6 +5,7 @@ import time
 import datetime as dt
 import pdfplumber
 import re
+import io
 
 # Imports internos
 from src.config import DEFAULT_SHEET_LINK
@@ -15,48 +16,78 @@ from src.orders_db import gerar_numero_oc, salvar_pedido, listar_pedidos, atuali
 
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
-# ===================== FUNÇÃO EXTRAÇÃO PDF ML =====================
+# ===================== NOVA FUNÇÃO DE LEITURA (CORRIGIDA) =====================
 def extrair_dados_pdf_ml(pdf_bytes):
-    """Lê o PDF de envio do ML e extrai SKU e Quantidade declarada."""
+    """
+    Lê o PDF de envio do ML usando extração de TABELA para evitar confundir
+    EAN/Código de Barras com a Quantidade.
+    """
     data = []
     try:
-        with pdfplumber.open(pd.io.common.BytesIO(pdf_bytes)) as pdf:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for page in pdf.pages:
-                text = page.extract_text()
-                if not text: continue
+                # Tenta extrair a estrutura de tabela da página
+                tabela = page.extract_table()
                 
-                # Tenta encontrar linhas que pareçam itens de envio
-                # Padrão visual do ML costuma ter o SKU e depois a Qtd
-                lines = text.split('\n')
-                for line in lines:
-                    # Lógica simples: Procura por algo que pareça SKU e um numero no fim
-                    # Exemplo de linha ML: "Produto XYZ  SKU123  10 un"
-                    parts = line.split()
-                    if len(parts) < 2: continue
-                    
-                    sku_cand = None
-                    qtd_cand = 0
-                    
-                    # Tenta achar a quantidade (geralmente o último ou penúltimo numero)
-                    # Varre de tras pra frente procurando numero
-                    for p in reversed(parts):
-                        if p.replace('.','').isdigit():
-                            qtd_cand = int(p.replace('.',''))
-                            break
-                    
-                    # Se achou qtd, tenta achar SKU (partes que tem letra e numero ou só letra maiuscula)
-                    # Isso é uma heurística, pode precisar ajustar conforme o layout exato do seu PDF
-                    if qtd_cand > 0:
-                        # Pega o maior token que parece um SKU na linha
-                        possiveis_skus = [x for x in parts if len(x) > 3 and any(c.isalpha() for c in x) and x.isupper()]
-                        if possiveis_skus:
-                            sku_cand = possiveis_skus[-1] # Geralmente o SKU ta perto da qtd
+                if tabela:
+                    # Se achou tabela, processa linha a linha
+                    for row in tabela:
+                        # O PDF do ML geralmente tem colunas: [PRODUTO, UNIDADES, IDENTIFICAÇÃO, ...]
+                        # Precisamos de pelo menos 2 colunas preenchidas
+                        if not row or len(row) < 2:
+                            continue
                             
-                            # Limpeza básica do SKU
-                            sku_cand = norm_sku(sku_cand)
-                            if sku_cand:
-                                data.append({"SKU": sku_cand, "Qtd_Envio": qtd_cand})
+                        col_produto = str(row[0])  # Texto cheio de coisas (SKU, EAN, Nome)
+                        col_qtd = str(row[1])      # Deveria ser só o número
+                        
+                        # 1. Tenta achar o SKU dentro da bagunça da coluna 1
+                        # Procura por "SKU:" seguido de algo
+                        match_sku = re.search(r'SKU:?\s*([\w\-\/]+)', col_produto, re.IGNORECASE)
+                        
+                        # 2. Limpa a quantidade (remove letras, espaços, pontos)
+                        # Ex: "16\nUnidades" vira "16"
+                        qtd_limpa = re.sub(r'[^\d]', '', col_qtd)
+                        
+                        if match_sku and qtd_limpa:
+                            sku = match_sku.group(1)
+                            qty = int(qtd_limpa)
+                            
+                            # Filtro de segurança: Se a quantidade for gigantesca, 
+                            # ainda pode ser um erro de leitura (ex: pegou um EAN na coluna errada)
+                            if qty < 100000: 
+                                data.append({"SKU": norm_sku(sku), "Qtd_Envio": qty})
                                 
+                else:
+                    # FALLBACK: Se não achou tabela (layout quebrou), usa texto corrido mas ignora números grandes
+                    text = page.extract_text()
+                    if not text: continue
+                    lines = text.split('\n')
+                    for line in lines:
+                        parts = line.split()
+                        if len(parts) < 2: continue
+                        
+                        # Tenta achar SKU
+                        sku_cand = None
+                        qtd_cand = 0
+                        
+                        # Procura SKU explicito
+                        match_sku_txt = re.search(r'SKU:?\s*([\w\-\/]+)', line, re.IGNORECASE)
+                        if match_sku_txt:
+                            sku_cand = match_sku_txt.group(1)
+                            
+                            # Tenta achar um número na linha que NÃO seja EAN (menor que 5 digitos)
+                            # Varre de trás pra frente
+                            for p in reversed(parts):
+                                p_clean = re.sub(r'[^\d]', '', p)
+                                if p_clean.isdigit():
+                                    val = int(p_clean)
+                                    if 0 < val < 20000: # Assumimos que ninguém envia 20 mil peças de um SKU
+                                        qtd_cand = val
+                                        break
+                            
+                            if sku_cand and qtd_cand > 0:
+                                data.append({"SKU": norm_sku(sku_cand), "Qtd_Envio": qtd_cand})
+
         return pd.DataFrame(data).drop_duplicates(subset=["SKU"])
     except Exception as e:
         st.error(f"Erro ao ler PDF: {e}")
@@ -266,6 +297,7 @@ with tab3:
         st.warning(f"⚠️ Primeiro vá na aba 'Análise & Compra' e clique em 'Calc {emp_pdf}' para carregar o Estoque Físico atual.")
     elif pdf_file:
         st.write("Lendo PDF...")
+        # Chama a nova função corrigida
         df_pdf = extrair_dados_pdf_ml(pdf_file.getvalue())
         
         if df_pdf.empty:
@@ -274,7 +306,6 @@ with tab3:
             st.success(f"Encontrados {len(df_pdf)} itens no PDF.")
             
             # Cruzamento
-            # df_res tem "SKU" e "Estoque_Fisico" (e Preco, Fornecedor)
             df_merged = df_pdf.merge(df_res[["SKU", "Estoque_Fisico", "fornecedor", "Preco"]], on="SKU", how="left")
             
             # Se não achou no estoque fisico, assume 0
@@ -282,13 +313,10 @@ with tab3:
             df_merged["Preco"] = df_merged["Preco"].fillna(0)
             
             # Lógica: O que falta?
-            # Se Qtd_Envio > Fisico, falta comprar a diferença
             df_merged["Faltam_Comprar"] = (df_merged["Qtd_Envio"] - df_merged["Estoque_Fisico"]).clip(lower=0)
             
-            # Exibição
             st.write("### Resultado da Análise do PDF")
             
-            # Estilização
             def highlight_falta(s):
                 return ['background-color: #ffcccc' if v > 0 else '' for v in s]
 
@@ -302,7 +330,6 @@ with tab3:
                 }
             )
             
-            # Botão Mágico
             total_falta = df_merged["Faltam_Comprar"].sum()
             if total_falta > 0:
                 if st.button(f"🛒 Adicionar {int(total_falta)} itens faltantes ao Pedido de Compra", type="primary"):
