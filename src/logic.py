@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import unicodedata
 from dataclasses import dataclass
 from .utils import norm_sku, br_to_float
 
@@ -43,22 +44,61 @@ def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_co
     out = out.rename(columns={"component_sku":"SKU","quantidade_comp":"Quantidade"})
     return out
 
+def gerar_chave_busca(text):
+    """Gera uma chave limpa (slug) para identificar a coluna, independente da formatação original"""
+    if not isinstance(text, str): return str(text)
+    text = unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('ASCII')
+    text = text.lower().strip()
+    # Remove caracteres especiais comuns
+    text = text.replace(' ', '_').replace('.', '').replace('(', '').replace(')', '').replace('-', '_')
+    return text
+
 def mapear_tipo(df: pd.DataFrame) -> str:
-    # Verifica EXATAMENTE os nomes do seu CSV
-    if "Estoque atual" in df.columns and "Código (SKU)" in df.columns:
-        return "FISICO"
+    # Cria mapa {chave_limpa: nome_original}
+    col_map = {gerar_chave_busca(c): c for c in df.columns}
+    keys = col_map.keys()
     
-    # Verifica assinaturas aproximadas para os outros arquivos
-    cols = [str(c).lower() for c in df.columns]
-    if any("vendas" in c and "60" in c for c in cols): return "FULL"
-    if any("quant" in c for c in cols) and not any("estoque" in c for c in cols): return "VENDAS"
+    # Assinaturas
+    has_sku = any(k in ['sku', 'codigo', 'codigo_sku', 'id'] for k in keys)
+    has_vendas = any('vendas' in k and '60' in k for k in keys)
+    
+    # Estoque Físico: estoque_atual, estoque_fisico, saldo...
+    has_estoque_fis = any(k in ['estoque_atual', 'estoque_fisico', 'saldo_atual'] for k in keys)
+    
+    if has_sku and has_vendas: return "FULL"
+    if has_sku and has_estoque_fis: return "FISICO"
+    
+    if has_sku and any(('qtd' in k or 'quant' in k) for k in keys) and not any('estoque' in k for k in keys):
+        return "VENDAS"
+
+    # Fallback genérico para Físico se tiver a palavra estoque
+    if has_sku and any('estoque' in k for k in keys):
+        return "FISICO"
 
     return "DESCONHECIDO"
 
 def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
     df = df.copy()
     
-    # Limpeza simples de número
+    # --- MAPEAMENTO INTELIGENTE ---
+    # 1. Cria um dicionário que liga o nome "limpo" ao nome REAL da coluna no DataFrame
+    # Ex: { 'codigo_sku': 'Código (SKU)', 'estoque_atual': 'Estoque atual' } 
+    # OU se já estiver limpo: { 'codigo_sku': 'codigo_sku' }
+    
+    col_map = {gerar_chave_busca(c): c for c in df.columns}
+    
+    def get_real_col(candidates):
+        """Retorna o nome real da coluna com base numa lista de candidatos limpos"""
+        for cand in candidates:
+            if cand in col_map:
+                return col_map[cand]
+        # Tenta busca parcial se exato falhar
+        for cand in candidates:
+            for k in col_map:
+                if cand in k:
+                    return col_map[k]
+        return None
+
     def clean_num(x):
         if isinstance(x, (int, float)): return x
         s = str(x).strip()
@@ -67,56 +107,56 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
         try: return float(s)
         except: return 0
 
-    # --- MAPEAMENTO ---
+    # Busca SKU
+    real_col_sku = get_real_col(['codigo_sku', 'sku', 'codigo', 'id'])
+    
+    if not real_col_sku:
+        # Cria dataframe vazio seguro para não crashar
+        return pd.DataFrame(columns=["SKU"])
+
+    df["SKU"] = df[real_col_sku].map(norm_sku)
 
     if tipo == "FISICO":
-        # LEITURA EXATA DO SEU ARQUIVO
-        # Se estas colunas não existirem, o erro vai dizer exatamente isso.
-        
-        try:
-            df["SKU"] = df["Código (SKU)"].map(norm_sku)
-            df["Estoque_Fisico"] = df["Estoque atual"].map(clean_num).fillna(0).astype(int)
+        # Procura por estoque_atual (prioridade) ou estoque_disponivel
+        real_col_est = get_real_col(['estoque_atual', 'estoque_disponivel', 'saldo', 'estoque'])
+        real_col_prc = get_real_col(['preco', 'custo', 'valor'])
+
+        if real_col_est:
+            df["Estoque_Fisico"] = df[real_col_est].map(clean_num).fillna(0).astype(int)
+        else:
+            raise RuntimeError(f"Erro Estoque: Não achei coluna de estoque. Colunas: {list(df.columns)}")
             
-            if "Preço" in df.columns:
-                df["Preco"] = df["Preço"].map(clean_num).fillna(0.0)
-            else:
-                df["Preco"] = 0.0
-                
-        except KeyError as e:
-            raise RuntimeError(f"Erro Crítico: O arquivo Físico NÃO tem a coluna exata: {e}. Colunas lidas: {list(df.columns)}")
+        df["Preco"] = df[real_col_prc].map(clean_num).fillna(0.0) if real_col_prc else 0.0
+        
+        # Retorna SEM somar, apenas remove duplicatas de SKU se houver
+        return df.drop_duplicates(subset=["SKU"])[["SKU", "Estoque_Fisico", "Preco"]]
 
-        # Retorna apenas as colunas necessárias, sem agrupar
-        return df[["SKU", "Estoque_Fisico", "Preco"]]
-
-    # Para FULL e VENDAS, mantemos a busca flexível pois não tenho esses arquivos aqui para validar
     if tipo == "FULL":
-        cols_lower = {c.lower(): c for c in df.columns}
+        # Busca colunas usando chaves limpas
+        # Vendas 60d
+        real_vendas = get_real_col(['vendas_qtd_60d', 'vendas_60d', 'vendas'])
         
-        col_sku = next((orig for low, orig in cols_lower.items() if "sku" in low or "codigo" in low), None)
-        col_vendas = next((orig for low, orig in cols_lower.items() if "vendas" in low and "60" in low), None)
-        col_full = next((orig for low, orig in cols_lower.items() if "estoque" in low and "full" in low), None)
-        if not col_full: col_full = next((orig for low, orig in cols_lower.items() if "estoque" in low), None)
-        col_transito = next((orig for low, orig in cols_lower.items() if "transito" in low), None)
+        # Estoque Full
+        # Tenta achar algo que tenha 'estoque' E 'full' no nome limpo
+        real_full = None
+        for k_limpa, v_real in col_map.items():
+            if 'estoque' in k_limpa and 'full' in k_limpa:
+                real_full = v_real
+                break
+        if not real_full: real_full = get_real_col(['estoque_full', 'estoque'])
+        
+        real_transito = get_real_col(['em_transito', 'transito'])
 
-        if not col_sku: df["SKU"] = "DESCONHECIDO"
-        else: df["SKU"] = df[col_sku].map(norm_sku)
-            
-        df["Vendas_Qtd_60d"] = df[col_vendas].map(clean_num).astype(int) if col_vendas else 0
-        df["Estoque_Full"] = df[col_full].map(clean_num).astype(int) if col_full else 0
-        df["Em_Transito"] = df[col_transito].map(clean_num).astype(int) if col_transito else 0
+        df["Vendas_Qtd_60d"] = df[real_vendas].map(clean_num).fillna(0).astype(int) if real_vendas else 0
+        df["Estoque_Full"] = df[real_full].map(clean_num).fillna(0).astype(int) if real_full else 0
+        df["Em_Transito"] = df[real_transito].map(clean_num).fillna(0).astype(int) if real_transito else 0
         
-        return df[["SKU", "Vendas_Qtd_60d", "Estoque_Full", "Em_Transito"]]
+        return df.drop_duplicates(subset=["SKU"])[["SKU", "Vendas_Qtd_60d", "Estoque_Full", "Em_Transito"]]
 
     if tipo == "VENDAS":
-        cols_lower = {c.lower(): c for c in df.columns}
-        col_sku = next((orig for low, orig in cols_lower.items() if "sku" in low), None)
-        col_qty = next((orig for low, orig in cols_lower.items() if "quant" in low or "qtd" in low), None)
-        
-        if not col_sku: df["SKU"] = "DESCONHECIDO"
-        else: df["SKU"] = df[col_sku].map(norm_sku)
-            
-        df["Quantidade"] = df[col_qty].map(clean_num).astype(int) if col_qty else 0
-        return df[["SKU", "Quantidade"]]
+        real_qty = get_real_col(['quantidade', 'qtd', 'quant', 'qtde'])
+        df["Quantidade"] = df[real_qty].map(clean_num).fillna(0).astype(int) if real_qty else 0
+        return df.drop_duplicates(subset=["SKU"])[["SKU", "Quantidade"]]
 
     return pd.DataFrame()
 
@@ -156,18 +196,13 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     fis = fisico_df.copy()
     fis["SKU"] = fis["SKU"].map(norm_sku)
     
-    # Remove duplicatas de SKU no físico pegando o primeiro que aparecer (evita multiplicação de linhas)
-    fis = fis.drop_duplicates(subset=["SKU"])
-    
+    # Merge direto (Left Join mantém a base de componentes)
     base = base.merge(fis, on="SKU", how="left")
     base["Estoque_Fisico"] = base["Estoque_Fisico"].fillna(0).astype(int)
     base["Preco"] = base["Preco"].fillna(0.0)
 
     # 3. Merge Full Info
     full_info = full[["SKU", "Estoque_Full", "Em_Transito", "Estoque_Full_Original"]].copy()
-    # Remove duplicatas de SKU no Full
-    full_info = full_info.drop_duplicates(subset=["SKU"])
-    
     base = base.merge(full_info, on="SKU", how="left", suffixes=("", "_FULL_RAW"))
     for c in ["Estoque_Full", "Em_Transito", "Estoque_Full_Original"]:
         if c in base.columns: base[c] = base[c].fillna(0).astype(int)
@@ -185,9 +220,6 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
         fk[["SKU","envio_desejado"]].rename(columns={"SKU":"kit_sku","envio_desejado":"Qtd"}),
         kits,"kit_sku","Qtd").rename(columns={"Quantidade":"Necessidade"})
     
-    # Remove duplicatas da necessidade
-    necessidade = necessidade.drop_duplicates(subset=["SKU"])
-
     base = base.merge(necessidade, on="SKU", how="left")
     base["Necessidade"] = base["Necessidade"].fillna(0).astype(int)
 
@@ -202,8 +234,6 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     full_exploded = explodir_por_kits(
         full[["SKU","Estoque_Full_Original"]].rename(columns={"SKU":"kit_sku","Estoque_Full_Original":"Qtd"}),
         kits,"kit_sku","Qtd").rename(columns={"Quantidade":"Estoque_Full_Real"})
-    
-    full_exploded = full_exploded.drop_duplicates(subset=["SKU"])
         
     base = base.merge(full_exploded, on="SKU", how="left")
     base["Estoque_Full"] = base["Estoque_Full_Real"].fillna(0).astype(int)
