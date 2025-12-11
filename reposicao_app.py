@@ -125,7 +125,8 @@ def add_to_cart_full(df_source, emp):
     c = 0
     for _, r in df_buy.iterrows():
         if r["SKU"] not in curr_skus:
-            preco = float(r["Preco"]) if "Preco" in r else 0.0
+            # Tenta pegar 'Preco' ou cai em 0.0 se não existir
+            preco = float(r.get("Preco", 0.0))
             curr.append({
                 "sku": r["SKU"], 
                 "qtd": int(r["Faltam_Comprar"]), 
@@ -218,7 +219,7 @@ with st.sidebar:
 st.title("Reposição Logística — Alivvia")
 if st.session_state.catalogo_df is None: st.warning("⚠️ Carregue o Padrão de Produtos no menu lateral.")
 
-# 🛑 NOVO LAYOUT DE 6 ABAS (CRÍTICO)
+# 🛑 LAYOUT DE 6 ABAS RESTAURADO
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📂 Uploads", "🔍 Análise & Compra", "🚛 Cruzar PDF Full", "📝 Editor OC", "🗂️ Gestão", "📦 Alocação"])
 
 # --- TAB 1: UPLOADS ---
@@ -336,7 +337,7 @@ with tab2:
                 if st.button(f"🛒 Enviar Selecionados ({emp}) para Editor", key=f"bt_{emp}"): 
                     add_to_cart(emp)
 
-# --- TAB 3: CRUZAR PDF FULL (RESTAURADO) ---
+# --- TAB 3: CRUZAR PDF FULL (RESTAURADO E CORRIGIDO) ---
 with tab3:
     st.header("🚛 Cruzar PDF Full")
     st.info("Carregue o PDF de Instruções de Preparação do Mercado Livre Full.")
@@ -352,24 +353,29 @@ with tab3:
             
             # 1. Merge com o Catálogo para obter preço e nome
             if st.session_state.catalogo_df is not None:
-                # Garante que as colunas do catálogo usadas para merge estão formatadas
                 df_cat = st.session_state.catalogo_df.copy()
                 df_cat["SKU"] = df_cat["sku"].apply(norm_sku)
                 
                 # Mapeamento seguro de colunas do catálogo (se existirem)
                 cols_to_use = ["SKU"]
+                # CRÍTICO: Usamos 'nome_produto' e 'preco' como nomes esperados no catálogo
                 if "nome_produto" in df_cat.columns: cols_to_use.append("nome_produto")
                 if "preco" in df_cat.columns: cols_to_use.append("preco")
                 
                 df_merge = df_pdf.merge(df_cat[cols_to_use], on="SKU", how="left")
                 
-                # Renomeia e calcula valor total
+                # Renomeia para exibição
                 df_merge = df_merge.rename(columns={"nome_produto": "Nome do Produto", "preco": "Preco"})
-                df_merge["Preco"] = pd.to_numeric(df_merge["Preco"], errors='coerce').fillna(0)
-                df_merge["Valor_Total"] = (df_merge["Qtd_Envio"] * df_merge["Preco"]).round(2)
                 df_pdf = df_merge # Usa o DF mesclado
             else:
-                 df_pdf["Valor_Total"] = 0.0 # Define um valor padrão se não tiver catálogo
+                 df_pdf["Preco"] = 0.0 # Cria coluna de preço vazia se não houver catálogo
+            
+            # 🛑 CORREÇÃO DO KEYERROR: Garante que 'Preco' é uma coluna e é numérica
+            if "Preco" not in df_pdf.columns:
+                 df_pdf["Preco"] = 0.0
+            
+            df_pdf["Preco"] = pd.to_numeric(df_pdf["Preco"], errors='coerce').fillna(0.0)
+            df_pdf["Valor_Total"] = (df_pdf["Qtd_Envio"] * df_pdf["Preco"]).round(2)
             
             cols_display_pdf = [c for c in ["SKU", "Nome do Produto", "Qtd_Envio", "Preco", "Valor_Total"] if c in df_pdf.columns]
             
@@ -394,7 +400,7 @@ with tab3:
                 for _, r in df_pdf.iterrows():
                     sku = r["SKU"]
                     qtd = r["Qtd_Envio"]
-                    preco = r["Preco"] if "Preco" in r and r["Preco"] is not None else 0.0 # Segurança
+                    preco = r["Preco"] 
                     origem = "PDF_FULL"
 
                     if qtd > 0:
@@ -417,7 +423,7 @@ with tab3:
     else:
         st.info("Aguardando upload do PDF de Full.")
 
-# --- TAB 4: EDITOR OC (ANTIGA TAB 3 - AGORA CORRIGIDA) ---
+# --- TAB 4: EDITOR OC (ANTIGA TAB 3 - CORRIGIDA PARA ADIÇÃO MANUAL) ---
 with tab4:
     st.header("📝 Editor de Ordem de Compra")
     st.info("⚠️ Para adicionar um item manualmente, digite o SKU, Qtd e Preço Unitário na última linha da tabela.")
@@ -427,7 +433,7 @@ with tab4:
     ped["empresa"] = c2.selectbox("Empresa OC", ["ALIVVIA", "JCA"])
     ped["obs"] = c3.text_input("Obs", ped["obs"])
     
-    # 🛑 A CORREÇÃO CRÍTICA É CRIAR UM DATAFRAME VAZIO SE O CARRINHO ESTIVER VAZIO
+    # CRÍTICO: Cria um DataFrame vazio se o carrinho estiver vazio
     if ped["itens"]:
         df_i = pd.DataFrame(ped["itens"])
     else:
