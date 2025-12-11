@@ -1,81 +1,72 @@
 # src/orders_db.py
-# Conexão com Supabase (V8.0)
-
 import streamlit as st
-from supabase import create_client, Client
+from supabase import create_client
 import pandas as pd
 import datetime as dt
 
-# Inicializa a conexão pegando os segredos do Streamlit Cloud
 def init_supabase():
     try:
         url = st.secrets["supabase"]["url"]
         key = st.secrets["supabase"]["key"]
         return create_client(url, key)
-    except Exception as e:
-        st.error("Erro ao conectar no Supabase. Verifique os 'Secrets'.")
+    except:
         return None
 
 def listar_pedidos():
-    """Baixa todos os pedidos do Supabase."""
+    """Baixa todos os pedidos e garante que as colunas existam."""
     supabase = init_supabase()
     if not supabase: return pd.DataFrame()
     
     try:
+        # Busca dados brutos
         response = supabase.table("pedidos").select("*").execute()
         dados = response.data
         
+        # Se não houver dados, retorna estrutura vazia correta
         if not dados:
-            return pd.DataFrame(columns=["ID", "Data", "Empresa", "Fornecedor", "Valor", "Status", "Dados_Completos"])
+            return pd.DataFrame(columns=["ID", "Data", "Empresa", "Fornecedor", "Valor", "Status", "Obs", "Dados_Completos"])
             
         lista_formatada = []
         for p in dados:
+            # Garante que campos opcionais tenham valor padrão
+            obs_val = p.get("obs") or "" 
+            
             lista_formatada.append({
-                "ID": p["id"],
-                "Data": p["data_emissao"],
-                "Empresa": p["empresa"],
-                "Fornecedor": p["fornecedor"],
-                "Valor": float(p["valor_total"]),
-                "Status": p["status"],
-                "Dados_Completos": p # Guarda o objeto todo para o PDF
+                "ID": str(p.get("id", "")),
+                "Data": str(p.get("data_emissao", "")),
+                "Empresa": str(p.get("empresa", "")),
+                "Fornecedor": str(p.get("fornecedor", "")),
+                "Valor": float(p.get("valor_total", 0.0)),
+                "Status": str(p.get("status", "Pendente")),
+                "Obs": str(obs_val),
+                "Dados_Completos": p.get("itens", [])
             })
-        
-        # Retorna ordenado por Data (mais novo primeiro)
-        df = pd.DataFrame(lista_formatada)
-        return df.sort_values(by="Data", ascending=False)
+            
+        return pd.DataFrame(lista_formatada)
         
     except Exception as e:
-        st.error(f"Erro ao listar: {e}")
+        st.error(f"Erro ao listar pedidos: {e}")
         return pd.DataFrame()
 
 def gerar_numero_oc(empresa):
-    """Gera o próximo ID baseado na contagem do banco."""
-    supabase = init_supabase()
-    if not supabase: return "ERRO"
-    
-    ano_atual = dt.datetime.now().strftime("%Y")
     prefixo = "ALV" if empresa == "ALIVVIA" else "JCA"
+    ano_atual = dt.date.today().year
+    supabase = init_supabase()
     
-    # Conta quantos pedidos dessa empresa existem neste ano
-    # (Lógica simplificada: conta tudo que contem o prefixo e ano)
-    filtro = f"OC-{prefixo}-{ano_atual}"
-    
-    # Pega todos os IDs para calcular localmente o maximo (mais seguro)
     try:
-        response = supabase.table("pedidos").select("id").ilike("id", f"{filtro}%").execute()
-        existentes = response.data
-        novo_num = len(existentes) + 1
-        return f"OC-{prefixo}-{ano_atual}-{novo_num:03d}"
-    except:
-        return f"OC-{prefixo}-{ano_atual}-001"
+        if supabase:
+            res = supabase.table("pedidos").select("id", count="exact").ilike("id", f"OC-{prefixo}-{ano_atual}-%").execute()
+            count = res.count + 1
+            return f"OC-{prefixo}-{ano_atual}-{count:03d}"
+    except: pass
+    
+    return f"OC-{prefixo}-{ano_atual}-{int(dt.datetime.now().timestamp())}"
 
 def salvar_pedido(pedido_dict):
-    """Envia o pedido para o Supabase."""
     supabase = init_supabase()
-    if not supabase: return
+    if not supabase: return False
     
     try:
-        # Prepara o JSON para o formato do banco
         dados_db = {
             "id": pedido_dict["id"],
             "empresa": pedido_dict["empresa"],
@@ -84,9 +75,8 @@ def salvar_pedido(pedido_dict):
             "valor_total": pedido_dict["valor_total"],
             "status": pedido_dict["status"],
             "obs": pedido_dict["obs"],
-            "itens": pedido_dict["itens"] # O Supabase aceita JSON direto
+            "itens": pedido_dict["itens"]
         }
-        
         supabase.table("pedidos").upsert(dados_db).execute()
         return True
     except Exception as e:
@@ -94,19 +84,11 @@ def salvar_pedido(pedido_dict):
         return False
 
 def atualizar_status(oc_id, novo_status):
-    """Atualiza apenas o status."""
     supabase = init_supabase()
-    if not supabase: return
-    try:
+    if supabase:
         supabase.table("pedidos").update({"status": novo_status}).eq("id", oc_id).execute()
-    except Exception as e:
-        st.error(f"Erro ao atualizar: {e}")
 
 def excluir_pedido_db(oc_id):
-    """Remove pedido do banco."""
     supabase = init_supabase()
-    if not supabase: return
-    try:
+    if supabase:
         supabase.table("pedidos").delete().eq("id", oc_id).execute()
-    except Exception as e:
-        st.error(f"Erro ao excluir: {e}")
