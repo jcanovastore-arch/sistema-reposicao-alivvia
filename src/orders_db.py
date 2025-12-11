@@ -1,4 +1,3 @@
-# src/orders_db.py
 import streamlit as st
 from supabase import create_client
 import pandas as pd
@@ -13,7 +12,7 @@ def init_supabase():
         return None
 
 def listar_pedidos():
-    """Baixa todos os pedidos e garante que as colunas existam."""
+    """Baixa todos os pedidos e trata nulos para evitar quebras."""
     supabase = init_supabase()
     if not supabase: return pd.DataFrame()
     
@@ -22,15 +21,16 @@ def listar_pedidos():
         response = supabase.table("pedidos").select("*").execute()
         dados = response.data
         
-        # Se não houver dados, retorna estrutura vazia correta
         if not dados:
             return pd.DataFrame(columns=["ID", "Data", "Empresa", "Fornecedor", "Valor", "Status", "Obs", "Dados_Completos"])
             
         lista_formatada = []
         for p in dados:
-            # Garante que campos opcionais tenham valor padrão
-            obs_val = p.get("obs") or "" 
-            
+            # Tratamento de Nulos (Segurança)
+            itens_seguros = p.get("itens")
+            if not isinstance(itens_seguros, list):
+                itens_seguros = []
+
             lista_formatada.append({
                 "ID": str(p.get("id", "")),
                 "Data": str(p.get("data_emissao", "")),
@@ -38,8 +38,8 @@ def listar_pedidos():
                 "Fornecedor": str(p.get("fornecedor", "")),
                 "Valor": float(p.get("valor_total", 0.0)),
                 "Status": str(p.get("status", "Pendente")),
-                "Obs": str(obs_val),
-                "Dados_Completos": p.get("itens", [])
+                "Obs": str(p.get("obs") or ""),
+                "Dados_Completos": itens_seguros # Já entrega a lista pronta
             })
             
         return pd.DataFrame(lista_formatada)
