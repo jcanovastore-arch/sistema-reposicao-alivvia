@@ -35,8 +35,9 @@ def extrair_dados_pdf_ml(pdf_bytes):
                 if tabela:
                     for row in tabela:
                         if not row or len(row) < 2: continue
-                        col_produto = str(row[0])
-                        col_qtd = str(row[1])
+                        # Garante que as colunas são strings para a regex
+                        col_produto = str(row[0]) if len(row) > 0 and row[0] is not None else ""
+                        col_qtd = str(row[1]) if len(row) > 1 and row[1] is not None else ""
                         
                         match_sku = re.search(r'SKU:?\s*([\w\-\/]+)', col_produto, re.IGNORECASE)
                         qtd_limpa = re.sub(r'[^\d]', '', col_qtd)
@@ -194,6 +195,7 @@ with st.sidebar:
     if st.button("🔄 Baixar do Google Sheets"):
         try:
             c, origem = carregar_padrao_local_ou_sheets(DEFAULT_SHEET_LINK)
+            # CRÍTICO: Garantir a compatibilidade do nome da coluna sku (component_sku)
             st.session_state.catalogo_df = c.catalogo_simples.rename(columns={"component_sku":"sku"})
             st.session_state.kits_df = c.kits_reais
             st.success(f"Carregado via {origem}!")
@@ -206,7 +208,8 @@ with st.sidebar:
         try:
             from src.data import _carregar_padrao_de_content 
             c = _carregar_padrao_de_content(up_manual.getvalue())
-            st.session_state.catalogo_df = c.catalogo_simples.rename(columns={"sku":"component_sku"})
+            # CRÍTICO: Garantir a compatibilidade do nome da coluna sku (component_sku)
+            st.session_state.catalogo_df = c.catalogo_simples.rename(columns={"component_sku":"sku"})
             st.session_state.kits_df = c.kits_reais
             st.success("✅ Arquivo carregado manualmente!")
         except Exception as e:
@@ -215,8 +218,8 @@ with st.sidebar:
 st.title("Reposição Logística — Alivvia")
 if st.session_state.catalogo_df is None: st.warning("⚠️ Carregue o Padrão de Produtos no menu lateral.")
 
-# Mantendo o layout de 5 abas que está no seu script
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📂 Uploads", "🔍 Análise & Compra", "📝 Editor OC", "🗂️ Gestão", "📦 Alocação"])
+# 🛑 NOVO LAYOUT DE 6 ABAS (CRÍTICO)
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📂 Uploads", "🔍 Análise & Compra", "🚛 Cruzar PDF Full", "📝 Editor OC", "🗂️ Gestão", "📦 Alocação"])
 
 # --- TAB 1: UPLOADS ---
 with tab1:
@@ -259,7 +262,8 @@ with tab2:
                 fis = pd.DataFrame()
                 if s["ESTOQUE"]["bytes"]:
                     fis = mapear_colunas(load_any_table_from_bytes(s["ESTOQUE"]["name"], s["ESTOQUE"]["bytes"]), "FISICO")
-                cat = Catalogo(st.session_state.catalogo_df.rename(columns={"sku":"component_sku"}), st.session_state.kits_df)
+                # CRÍTICO: Garantir que a coluna 'sku' está no catalogo simples para passar para a lógica
+                cat = Catalogo(st.session_state.catalogo_df, st.session_state.kits_df)
                 res, _ = calcular(full, fis, vend, cat, h_p, g_p, lt_p)
                 st.session_state[f"resultado_{emp}"] = res
                 st.success(f"{emp} OK!")
@@ -332,8 +336,89 @@ with tab2:
                 if st.button(f"🛒 Enviar Selecionados ({emp}) para Editor", key=f"bt_{emp}"): 
                     add_to_cart(emp)
 
-# --- TAB 3: EDITOR OC (CORRIGIDO PARA ADIÇÃO MANUAL E CONTEXTO) ---
+# --- TAB 3: CRUZAR PDF FULL (RESTAURADO) ---
 with tab3:
+    st.header("🚛 Cruzar PDF Full")
+    st.info("Carregue o PDF de Instruções de Preparação do Mercado Livre Full.")
+
+    c_pdf, c_btn = st.columns([3, 1])
+    pdf_file = c_pdf.file_uploader("Upload PDF:", type=["pdf"], key="pdf_full_upload")
+    
+    if pdf_file:
+        df_pdf = extrair_dados_pdf_ml(pdf_file.getvalue())
+        
+        if not df_pdf.empty:
+            st.success(f"{len(df_pdf)} SKUs extraídos com sucesso do PDF.")
+            
+            # 1. Merge com o Catálogo para obter preço e nome
+            if st.session_state.catalogo_df is not None:
+                # Garante que as colunas do catálogo usadas para merge estão formatadas
+                df_cat = st.session_state.catalogo_df.copy()
+                df_cat["SKU"] = df_cat["sku"].apply(norm_sku)
+                
+                # Mapeamento seguro de colunas do catálogo (se existirem)
+                cols_to_use = ["SKU"]
+                if "nome_produto" in df_cat.columns: cols_to_use.append("nome_produto")
+                if "preco" in df_cat.columns: cols_to_use.append("preco")
+                
+                df_merge = df_pdf.merge(df_cat[cols_to_use], on="SKU", how="left")
+                
+                # Renomeia e calcula valor total
+                df_merge = df_merge.rename(columns={"nome_produto": "Nome do Produto", "preco": "Preco"})
+                df_merge["Preco"] = pd.to_numeric(df_merge["Preco"], errors='coerce').fillna(0)
+                df_merge["Valor_Total"] = (df_merge["Qtd_Envio"] * df_merge["Preco"]).round(2)
+                df_pdf = df_merge # Usa o DF mesclado
+            else:
+                 df_pdf["Valor_Total"] = 0.0 # Define um valor padrão se não tiver catálogo
+            
+            cols_display_pdf = [c for c in ["SKU", "Nome do Produto", "Qtd_Envio", "Preco", "Valor_Total"] if c in df_pdf.columns]
+            
+            st.data_editor(
+                df_pdf[cols_display_pdf],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Qtd_Envio": st.column_config.NumberColumn("Qtd PDF", format="%d", disabled=True),
+                    "Preco": st.column_config.NumberColumn("Preço (Catálogo)", format="R$ %.2f", disabled=True),
+                    "Valor_Total": st.column_config.NumberColumn("Total (R$)", format="R$ %.2f", disabled=True),
+                }
+            )
+
+            # 2. Botão para adicionar ao carrinho 
+            if c_btn.button("🛒 Enviar para Editor OC", type="primary"):
+                curr = st.session_state.pedido_ativo["itens"]
+                # Usa um dicionário para permitir somar quantidades se o SKU já estiver no carrinho
+                curr_skus_dict = {i["sku"]: i for i in curr} 
+                c = 0
+
+                for _, r in df_pdf.iterrows():
+                    sku = r["SKU"]
+                    qtd = r["Qtd_Envio"]
+                    preco = r["Preco"] if "Preco" in r and r["Preco"] is not None else 0.0 # Segurança
+                    origem = "PDF_FULL"
+
+                    if qtd > 0:
+                        if sku in curr_skus_dict:
+                             curr_skus_dict[sku]["qtd"] += qtd
+                        else:
+                            curr_skus_dict[sku] = {
+                                "sku": sku, 
+                                "qtd": int(qtd), # Garante que é inteiro
+                                "valor_unit": float(preco), # Garante que é float
+                                "origem": origem
+                            }
+                        c += 1
+                
+                st.session_state.pedido_ativo["itens"] = list(curr_skus_dict.values())
+                st.toast(f"{c} itens do PDF adicionados ou somados ao pedido!", icon="🛒")
+
+        else:
+            st.warning("Não foi possível extrair SKUs do PDF.")
+    else:
+        st.info("Aguardando upload do PDF de Full.")
+
+# --- TAB 4: EDITOR OC (ANTIGA TAB 3 - AGORA CORRIGIDA) ---
+with tab4:
     st.header("📝 Editor de Ordem de Compra")
     st.info("⚠️ Para adicionar um item manualmente, digite o SKU, Qtd e Preço Unitário na última linha da tabela.")
     ped = st.session_state.pedido_ativo
@@ -419,8 +504,8 @@ with tab3:
             st.success(f"OC {nid} gerada!"); st.session_state.pedido_ativo["itens"] = []; time.sleep(1); st.rerun()
     if c_btn2.button("🗑️ Limpar"): st.session_state.pedido_ativo["itens"] = []; st.rerun()
 
-# --- TAB 4: GESTÃO (CORRIGIDO PARA IMPRESSÃO E CONTEXTO) ---
-with tab4:
+# --- TAB 5: GESTÃO (ANTIGA TAB 4 - CORRIGIDA PARA IMPRESSÃO E CONTEXTO) ---
+with tab5:
     st.header("🗂️ Gestão de Ordens de Compra")
     
     col_print, col_update = st.columns([1, 4])
@@ -489,8 +574,8 @@ with tab4:
                 else: 
                     st.write("Sem detalhes dos itens.")
 
-# --- TAB 5: ALOCAÇÃO (Simplificada) ---
-with tab5:
+# --- TAB 6: ALOCAÇÃO (ANTIGA TAB 5) ---
+with tab6:
     st.header("📦 Alocação de Compra (JCA vs ALIVVIA)")
     
     ra = st.session_state.get("resultado_ALIVVIA")
