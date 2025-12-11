@@ -50,7 +50,7 @@ def mapear_colunas_catalogo(df: pd.DataFrame) -> pd.DataFrame:
 
     return df_mapped
 
-# --- Carregamento Padrão (Excel - Lógica Original Restaurada) ---
+# --- Carregamento Padrão (Excel - CORRIGIDO ENGINE) ---
 def carregar_padrao_local_ou_sheets(url=None):
     if url is None: url = DEFAULT_SHEET_LINK
     df = None
@@ -59,7 +59,9 @@ def carregar_padrao_local_ou_sheets(url=None):
     try:
         # Tenta local
         if os.path.exists(local_path):
-            try: df = pd.read_excel(local_path, dtype=str)
+            try: 
+                # ADICIONADO engine='openpyxl' PARA EVITAR ERRO
+                df = pd.read_excel(local_path, dtype=str, engine='openpyxl')
             except: pass
         
         # Tenta baixar se não tiver local
@@ -68,7 +70,8 @@ def carregar_padrao_local_ou_sheets(url=None):
             response = s.get(url, timeout=45)
             if response.status_code == 200:
                 bio = io.BytesIO(response.content)
-                df = pd.read_excel(bio, dtype=str)
+                # ADICIONADO engine='openpyxl' PARA EVITAR ERRO
+                df = pd.read_excel(bio, dtype=str, engine='openpyxl')
                 with open(local_path, "wb") as f: f.write(response.content)
             else: return None, f"Erro HTTP {response.status_code}."
 
@@ -90,7 +93,7 @@ def carregar_padrao_local_ou_sheets(url=None):
     except Exception as e: return None, f"Erro Geral: {e}"
     return None, "Erro desconhecido."
 
-# --- NOVO CÓDIGO: Função Isolada para ler PDF do Full ---
+# --- Função Isolada para ler PDF do Full ---
 def ler_pdf_full(file_bytes):
     try:
         tabelas = read_pdf(io.BytesIO(file_bytes), pages='all', multiple_tables=True, output_format="dataframe")
@@ -129,7 +132,7 @@ def ler_pdf_full(file_bytes):
         pass
     return pd.DataFrame()
 
-# Função principal de leitura (ADAPTADA APENAS PARA DIRECIONAR O PDF)
+# Função principal de leitura
 def load_any_table_from_bytes(file_name, file_bytes):
     bio = io.BytesIO(file_bytes)
     name = file_name.lower()
@@ -142,13 +145,19 @@ def load_any_table_from_bytes(file_name, file_bytes):
 
     # Se não for PDF, segue a lógica antiga (Excel/CSV)
     try:
-        if name.endswith(".csv"): df = pd.read_csv(bio, sep=None, engine="python", dtype=str)
-        else: df = pd.read_excel(bio, dtype=str)
+        if name.endswith(".csv"): 
+            df = pd.read_csv(bio, sep=None, engine="python", dtype=str)
+        else: 
+            # ADICIONADO engine='openpyxl'
+            df = pd.read_excel(bio, dtype=str, engine='openpyxl')
     except:
         try:
             bio.seek(0)
-            if name.endswith(".csv"): df = pd.read_csv(bio, sep=None, engine="python", dtype=str, header=2)
-            else: df = pd.read_excel(bio, dtype=str, header=2)
+            if name.endswith(".csv"): 
+                df = pd.read_csv(bio, sep=None, engine="python", dtype=str, header=2)
+            else: 
+                # ADICIONADO engine='openpyxl'
+                df = pd.read_excel(bio, dtype=str, header=2, engine='openpyxl')
         except: return pd.DataFrame()
 
     if df is not None:

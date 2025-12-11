@@ -1,10 +1,10 @@
 streamlit
 pandas
 numpy
-reportlab
-openpyxl
 requests
 unidecode
 supabase
+XlsxWriter
+openpyxl
 tabula-py
 jpype1
