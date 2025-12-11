@@ -229,33 +229,43 @@ with tab2:
                 st.session_state[f"resultado_{emp}"] = res
                 st.success(f"{emp} OK!")
             except Exception as e: st.error(f"Erro: {e}")
+        
         if c1.button("Calc ALIVVIA", use_container_width=True): run_calc("ALIVVIA")
         if c2.button("Calc JCA", use_container_width=True): run_calc("JCA")
         
         st.divider()
+
+        # FILTROS (SKU e FORNECEDOR)
         f1, f2 = st.columns(2)
-        sku_f = f1.text_input("🔎 SKU", key="f_sku", on_change=reset_selection).upper()
+        sku_f = f1.text_input("🔎 Filtro SKU", key="f_sku", on_change=reset_selection).upper()
+        
+        # Lógica para coletar todos os fornecedores
+        forns = set()
+        if st.session_state.resultado_ALIVVIA is not None: forns.update(st.session_state.resultado_ALIVVIA["fornecedor"].dropna().unique())
+        if st.session_state.resultado_JCA is not None: forns.update(st.session_state.resultado_JCA["fornecedor"].dropna().unique())
+        lista_forns = ["TODOS"] + sorted(list(forns))
+        forn_f = f2.selectbox("🏭 Filtro Fornecedor", lista_forns, key="f_forn", on_change=reset_selection)
         
         for emp in ["ALIVVIA", "JCA"]:
             if st.session_state.get(f"resultado_{emp}") is not None:
                 st.markdown(f"### 📊 {emp}")
                 df = st.session_state[f"resultado_{emp}"].copy()
-                if sku_f: df = df[df["SKU"].str.contains(sku_f, na=False)]
                 
-                # CÓDIGO RESTAURADO: BALANÇO DE ESTOQUE E VALORES
+                # APLICAÇÃO DOS FILTROS
+                if sku_f: df = df[df["SKU"].str.contains(sku_f, na=False)]
+                if forn_f != "TODOS": df = df[df["fornecedor"] == forn_f] # Aplica o filtro de Fornecedor
+                
+                # BALANÇO (Métricas de Unidade e Valor)
                 if not df.empty and 'Estoque_Fisico' in df.columns and 'Estoque_Full' in df.columns and 'Preco' in df.columns:
                     m1, m2, m3, m4 = st.columns(4)
                     
-                    # Totais de Estoque
-                    tot_fis = df['Estoque_Fisico'].sum()
-                    tot_full = df['Estoque_Full'].sum()
-                    
-                    # Totais de Valor
-                    # Verifica se as colunas estão no tipo correto para multiplicação (float/int)
+                    # Converte para numérico antes de somar (garantia contra texto nos arquivos)
                     df['Preco'] = pd.to_numeric(df['Preco'], errors='coerce').fillna(0)
                     df['Estoque_Fisico'] = pd.to_numeric(df['Estoque_Fisico'], errors='coerce').fillna(0)
                     df['Estoque_Full'] = pd.to_numeric(df['Estoque_Full'], errors='coerce').fillna(0)
 
+                    tot_fis = df['Estoque_Fisico'].sum()
+                    tot_full = df['Estoque_Full'].sum()
                     val_fis = (df['Estoque_Fisico'] * df['Preco']).sum()
                     val_full = (df['Estoque_Full'] * df['Preco']).sum()
 
@@ -264,8 +274,7 @@ with tab2:
                     m3.metric("Full (Un)", format_br_int(tot_full))
                     m4.metric("Full (R$)", format_br_currency(val_full))
                 
-                # Fim do CÓDIGO RESTAURADO
-
+                # Tabela
                 k_sku = f"c_skus_{emp}"
                 st.session_state[k_sku] = df["SKU"].tolist()
                 sel = st.session_state[f"sel_{emp[0]}"]
@@ -273,27 +282,7 @@ with tab2:
                 
                 cols = [c for c in ["Selecionar", "SKU", "fornecedor", "Vendas_Total_60d", "Estoque_Full", "Estoque_Fisico", "Preco", "Compra_Sugerida"] if c in df.columns]
                 st.data_editor(style_df_compra(df[cols]), key=f"ed_{emp}", use_container_width=True, hide_index=True, column_config={"Selecionar": st.column_config.CheckboxColumn(default=False)}, on_change=update_sel, args=(f"ed_{emp}", k_sku, sel))
-                if st.button(f"🛒 Add ao Pedido ({emp})", key=f"bt_{emp}"): add_to_cart(emp)
-# --- TAB 3: CRUZAMENTO PDF FULL (AGORA COM CUSTOS) ---
-with tab3:
-    st.header("🚛 Cruzar PDF de Envio vs Estoque Físico")
-    st.info("O sistema agora separa os Kits e mostra os componentes (SKU simples) que faltam.")
-    
-    emp_pdf = st.radio("Empresa do Envio:", ["ALIVVIA", "JCA"], horizontal=True)
-    pdf_file = st.file_uploader("Arrastar PDF do Envio Full", type=["pdf"])
-    
-    df_res = st.session_state.get(f"resultado_{emp_pdf}")
-    
-    if df_res is None:
-        st.warning(f"⚠️ Primeiro vá na aba 'Análise & Compra' e clique em 'Calc {emp_pdf}' para carregar o Estoque Físico atual.")
-    elif pdf_file:
-        st.write("Lendo PDF e explodindo kits...")
-        df_pdf = extrair_dados_pdf_ml(pdf_file.getvalue())
-        
-        if df_pdf.empty:
-            st.error("Não consegui ler itens no PDF.")
-        else:
-            # ================= LÓGICA DE EXPLOSÃO =================
+                if st.button(f"🛒 Add ao Pedido ({emp})", key=f"bt_{emp}"): add_to_cart(emp)            # ================= LÓGICA DE EXPLOSÃO =================
             if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
                  st.error("Padrão de produtos não carregado. Não consigo explodir kits.")
             else:
