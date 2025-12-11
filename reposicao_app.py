@@ -21,7 +21,7 @@ from src.orders_db import gerar_numero_oc, salvar_pedido, listar_pedidos, atuali
 
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
-# ===================== FUNÇÃO DE LEITURA PDF (CORRIGIDA) =====================
+# ===================== FUNÇÃO DE LEITURA PDF =====================
 def extrair_dados_pdf_ml(pdf_bytes):
     """
     Lê o PDF de envio do ML usando extração de TABELA para evitar confundir
@@ -422,18 +422,24 @@ with tab4:
         df_i["qtd"] = pd.to_numeric(df_i["qtd"], errors='coerce').fillna(0).astype(int)
         df_i["Total"] = (df_i["qtd"] * df_i["valor_unit"]).round(2)
         
-        # LÓGICA DE JOIN CRUCIAL: Traz Nome do Produto e Fornecedor
+        # LÓGICA DE JOIN CRUCIAL: Traz Nome do Produto e Fornecedor (COM SEGURANÇA CONTRA KEYERROR)
         if st.session_state.catalogo_df is not None:
              df_cat = st.session_state.catalogo_df.copy()
              
-             # Renomeia colunas para o Join e Exibição
-             df_cat = df_cat.rename(columns={"sku": "sku", "nome_produto": "Nome do Produto", "fornecedor": "Forn. Info"})
+             rename_map = {}
+             # Tentamos renomear as colunas que esperamos. Se não existirem, elas não são renomeadas.
+             if 'nome_produto' in df_cat.columns: rename_map['nome_produto'] = 'Nome do Produto'
+             if 'fornecedor' in df_cat.columns: rename_map['fornecedor'] = 'Forn. Info'
              
-             # Limita colunas de catálogo para o Join
-             cols_join = [c for c in ["sku", "Nome do Produto", "Forn. Info"] if c in df_cat.columns]
+             df_cat = df_cat.rename(columns=rename_map)
+
+             # Colunas a serem usadas no merge: verificamos quais colunas de contexto estão presentes
+             cols_to_merge = ["sku"]
+             if "Nome do Produto" in df_cat.columns: cols_to_merge.append("Nome do Produto")
+             if "Forn. Info" in df_cat.columns: cols_to_merge.append("Forn. Info")
              
              # Faz o merge para adicionar as colunas de contexto
-             df_i = df_i.merge(df_cat[cols_join], on="sku", how="left")
+             df_i = df_i.merge(df_cat[cols_to_merge], on="sku", how="left")
              
         # Colunas a exibir na ordem e nome desejados
         cols_display = ["sku", "Nome do Produto", "Forn. Info", "qtd", "valor_unit", "Total", "origem"]
@@ -473,7 +479,9 @@ with tab4:
             if salvar_pedido(dados):
                 st.success(f"OC {nid} gerada!"); st.session_state.pedido_ativo["itens"] = []; time.sleep(1); st.rerun()
         if st.button("🗑️ Limpar"): st.session_state.pedido_ativo["itens"] = []; st.rerun()
-    else: st.info("Carrinho vazio.")# --- TAB 5: GESTÃO ---
+    else: st.info("Carrinho vazio.")
+
+# --- TAB 5: GESTÃO ---
 with tab5:
     st.header("🗂️ Gestão de Ordens de Compra")
     
@@ -502,7 +510,9 @@ with tab5:
             if c_a2.button("✔️ Atualizar Status"): atualizar_status(sel_oc, ns); st.success("Status atualizado!"); time.sleep(1); st.rerun()
             
             # Detalhes e Exclusão
-            with st.expander(f"Detalhes da OC {sel_oc}"):
+            if c_a3.button("🗑️ Excluir", help="Excluir Ordem de Compra.", key="delete_oc_btn"): excluir_pedido_db(sel_oc); st.warning("Excluído"); time.sleep(1); st.rerun()
+
+            with st.expander(f"Detalhes da OC {sel_oc}", expanded=True):
                 st.markdown(f"**Fornecedor:** {row['Fornecedor']} | **Empresa:** {row['Empresa']} | **Valor Total:** {format_br_currency(row['Valor'])}")
                 st.markdown(f"**Observações:** {row['Obs']}")
                 
@@ -510,11 +520,20 @@ with tab5:
                 if isinstance(itens, list) and len(itens) > 0: 
                     df_itens = pd.DataFrame(itens)
                     
-                    # Adiciona Nome do Produto e Fornecedor Info para contexto
+                    # Adiciona Nome do Produto e Fornecedor Info para contexto (COM SEGURANÇA)
                     if st.session_state.catalogo_df is not None:
                         df_cat = st.session_state.catalogo_df.copy()
-                        df_cat = df_cat.rename(columns={"sku": "sku", "nome_produto": "Nome do Produto", "fornecedor": "Forn. Info"})
-                        df_itens = df_itens.merge(df_cat[["sku", "Nome do Produto", "Forn. Info"]], on="sku", how="left")
+                        
+                        rename_map = {}
+                        if 'nome_produto' in df_cat.columns: rename_map['nome_produto'] = 'Nome do Produto'
+                        if 'fornecedor' in df_cat.columns: rename_map['fornecedor'] = 'Forn. Info'
+                        df_cat = df_cat.rename(columns=rename_map)
+                        
+                        cols_to_merge = ["sku"]
+                        if "Nome do Produto" in df_cat.columns: cols_to_merge.append("Nome do Produto")
+                        if "Forn. Info" in df_cat.columns: cols_to_merge.append("Forn. Info")
+                        
+                        df_itens = df_itens.merge(df_cat[cols_to_merge], on="sku", how="left")
                     
                     df_itens["Total"] = df_itens["qtd"].astype(float) * df_itens["valor_unit"].astype(float)
                     
@@ -531,8 +550,7 @@ with tab5:
                     )
                 else: 
                     st.write("Sem detalhes dos itens.")
-            
-            if c_a3.button("🗑️ Excluir", help="Excluir Ordem de Compra.", key="delete_oc_btn"): excluir_pedido_db(sel_oc); st.warning("Excluído"); time.sleep(1); st.rerun()
+
 # --- TAB 6: ALOCAÇÃO ---
 with tab6:
     st.header("📦 Alocação de Compra")
