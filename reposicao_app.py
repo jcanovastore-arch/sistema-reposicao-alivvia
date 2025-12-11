@@ -12,10 +12,11 @@ from typing import Optional, Tuple
 # Imports internos
 from src.config import DEFAULT_SHEET_LINK
 # format_br_int é necessário para formatar os valores inteiros corretamente
+# CRÍTICO: Importar format_br_int e format_br_currency
 from src.utils import style_df_compra, norm_sku, format_br_currency, format_br_int 
 # _carregar_padrao_de_content é necessária para o upload manual de planilha
 from src.data import get_local_file_path, get_local_name_path, load_any_table_from_bytes, carregar_padrao_local_ou_sheets, _carregar_padrao_de_content
-# ESSENCIAL: Inclusão das funções de Kit que estavam causando o NameError
+# ESSENCIAL: Inclusão das funções de Kit e cálculo
 from src.logic import Catalogo, mapear_colunas, calcular, explodir_por_kits, construir_kits_efetivo
 from src.orders_db import gerar_numero_oc, salvar_pedido, listar_pedidos, atualizar_status, excluir_pedido_db
 
@@ -117,6 +118,7 @@ def add_to_cart_full(df_source, emp):
     if df_source is None or df_source.empty: return
     if "Faltam_Comprar" not in df_source.columns: return
 
+    # Filtra apenas o que falta para comprar
     df_buy = df_source[df_source["Faltam_Comprar"] > 0].copy()
     if df_buy.empty: return st.toast("Nada faltante para comprar!", icon="✅")
 
@@ -136,7 +138,8 @@ def add_to_cart_full(df_source, emp):
             c += 1
             
     st.session_state.pedido_ativo["itens"] = curr
-    if not st.session_state.pedido_ativo["fornecedor"] and "fornecedor" in df_buy.columns:
+    # Tenta preencher fornecedor
+    if not st.session_state.pedido_ativo["fornecedor"] and "fornecedor" in df_buy.columns and not df_buy["fornecedor"].empty:
          st.session_state.pedido_ativo["fornecedor"] = df_buy.iloc[0]["fornecedor"]
          
     st.toast(f"{c} itens adicionados ao pedido!", icon="🛒")
@@ -219,7 +222,7 @@ with st.sidebar:
 st.title("Reposição Logística — Alivvia")
 if st.session_state.catalogo_df is None: st.warning("⚠️ Carregue o Padrão de Produtos no menu lateral.")
 
-# 🛑 LAYOUT DE 6 ABAS RESTAURADO
+# 🛑 LAYOUT DE 6 ABAS RESTAURADO E CORRIGIDO
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📂 Uploads", "🔍 Análise & Compra", "🚛 Cruzar PDF Full", "📝 Editor OC", "🗂️ Gestão", "📦 Alocação"])
 
 # --- TAB 1: UPLOADS ---
@@ -255,9 +258,6 @@ with tab2:
             s = st.session_state[emp]
             if not (s["FULL"]["bytes"] and s["VENDAS"]["bytes"]): return st.warning("Faltam arquivos.")
             try:
-                # Necessário importar as funções que o script original não tinha
-                from src.logic import mapear_colunas, load_any_table_from_bytes, Catalogo, calcular
-                
                 full = mapear_colunas(load_any_table_from_bytes(s["FULL"]["name"], s["FULL"]["bytes"]), "FULL")
                 vend = mapear_colunas(load_any_table_from_bytes(s["VENDAS"]["name"], s["VENDAS"]["bytes"]), "VENDAS")
                 fis = pd.DataFrame()
@@ -297,6 +297,7 @@ with tab2:
                 if not df.empty:
                     m1, m2, m3, m4 = st.columns(4)
                     
+                    # Converte para numérico antes de somar (garantia contra texto nos arquivos)
                     df['Preco'] = pd.to_numeric(df['Preco'], errors='coerce').fillna(0)
                     df['Estoque_Fisico'] = pd.to_numeric(df['Estoque_Fisico'], errors='coerce').fillna(0)
                     df['Estoque_Full'] = pd.to_numeric(df['Estoque_Full'], errors='coerce').fillna(0)
@@ -326,7 +327,7 @@ with tab2:
                     hide_index=True,
                     column_config={
                         "Selecionar": st.column_config.CheckboxColumn(default=False),
-                        "Estoque_Fisico": st.column_config.NumberColumn("Físico (Bruto)", help="Estoque lido diretamente do arquivo."),
+                        "Estoque_Fisico": st.column_config.NumberColumn("Físico (Bruto)", help="Estoque lido diretamente do arquivo.", format="%d"),
                         "Preco": st.column_config.NumberColumn("Preço Unitário", format="R$ %.2f"),
                         "Valor_Compra_R$": st.column_config.NumberColumn("Valor Compra", format="R$ %.2f")
                     },
@@ -337,91 +338,117 @@ with tab2:
                 if st.button(f"🛒 Enviar Selecionados ({emp}) para Editor", key=f"bt_{emp}"): 
                     add_to_cart(emp)
 
-# --- TAB 3: CRUZAR PDF FULL (RESTAURADO E CORRIGIDO) ---
+# --- TAB 3: CRUZAR PDF FULL (RESTAURADO E CORRIGIDO COM EXPLOSÃO) ---
 with tab3:
     st.header("🚛 Cruzar PDF Full")
-    st.info("Carregue o PDF de Instruções de Preparação do Mercado Livre Full.")
+    st.info("⚠️ Para análise correta, calcule a aba 'Análise & Compra' primeiro. O Catálogo de Kits e Preços será usado na explosão.")
 
-    c_pdf, c_btn = st.columns([3, 1])
-    pdf_file = c_pdf.file_uploader("Upload PDF:", type=["pdf"], key="pdf_full_upload")
+    emp_pdf = st.radio("Empresa do Envio:", ["ALIVVIA", "JCA"], horizontal=True, key="emp_pdf_full")
+    pdf_file = st.file_uploader("Upload PDF de Instruções de Preparação", type=["pdf"], key="pdf_full_upload")
     
-    if pdf_file:
-        df_pdf = extrair_dados_pdf_ml(pdf_file.getvalue())
+    df_res = st.session_state.get(f"resultado_{emp_pdf}") # Estoque Físico e Preços vêm da Tab 2
+    
+    if df_res is None:
+        st.warning(f"⚠️ Primeiro vá na aba 'Análise & Compra' e clique em 'Calc {emp_pdf}' para carregar o Estoque Físico e Preços atuais.")
+    elif pdf_file:
+        st.write("Lendo PDF e explodindo kits...")
+        df_pdf_bruto = extrair_dados_pdf_ml(pdf_file.getvalue())
         
-        if not df_pdf.empty:
-            st.success(f"{len(df_pdf)} SKUs extraídos com sucesso do PDF.")
-            
-            # 1. Merge com o Catálogo para obter preço e nome
-            if st.session_state.catalogo_df is not None:
-                df_cat = st.session_state.catalogo_df.copy()
-                df_cat["SKU"] = df_cat["sku"].apply(norm_sku)
-                
-                # Mapeamento seguro de colunas do catálogo (se existirem)
-                cols_to_use = ["SKU"]
-                # CRÍTICO: Usamos 'nome_produto' e 'preco' como nomes esperados no catálogo
-                if "nome_produto" in df_cat.columns: cols_to_use.append("nome_produto")
-                if "preco" in df_cat.columns: cols_to_use.append("preco")
-                
-                df_merge = df_pdf.merge(df_cat[cols_to_use], on="SKU", how="left")
-                
-                # Renomeia para exibição
-                df_merge = df_merge.rename(columns={"nome_produto": "Nome do Produto", "preco": "Preco"})
-                df_pdf = df_merge # Usa o DF mesclado
-            else:
-                 df_pdf["Preco"] = 0.0 # Cria coluna de preço vazia se não houver catálogo
-            
-            # 🛑 CORREÇÃO DO KEYERROR: Garante que 'Preco' é uma coluna e é numérica
-            if "Preco" not in df_pdf.columns:
-                 df_pdf["Preco"] = 0.0
-            
-            df_pdf["Preco"] = pd.to_numeric(df_pdf["Preco"], errors='coerce').fillna(0.0)
-            df_pdf["Valor_Total"] = (df_pdf["Qtd_Envio"] * df_pdf["Preco"]).round(2)
-            
-            cols_display_pdf = [c for c in ["SKU", "Nome do Produto", "Qtd_Envio", "Preco", "Valor_Total"] if c in df_pdf.columns]
-            
-            st.data_editor(
-                df_pdf[cols_display_pdf],
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Qtd_Envio": st.column_config.NumberColumn("Qtd PDF", format="%d", disabled=True),
-                    "Preco": st.column_config.NumberColumn("Preço (Catálogo)", format="R$ %.2f", disabled=True),
-                    "Valor_Total": st.column_config.NumberColumn("Total (R$)", format="R$ %.2f", disabled=True),
-                }
-            )
-
-            # 2. Botão para adicionar ao carrinho 
-            if c_btn.button("🛒 Enviar para Editor OC", type="primary"):
-                curr = st.session_state.pedido_ativo["itens"]
-                # Usa um dicionário para permitir somar quantidades se o SKU já estiver no carrinho
-                curr_skus_dict = {i["sku"]: i for i in curr} 
-                c = 0
-
-                for _, r in df_pdf.iterrows():
-                    sku = r["SKU"]
-                    qtd = r["Qtd_Envio"]
-                    preco = r["Preco"] 
-                    origem = "PDF_FULL"
-
-                    if qtd > 0:
-                        if sku in curr_skus_dict:
-                             curr_skus_dict[sku]["qtd"] += qtd
-                        else:
-                            curr_skus_dict[sku] = {
-                                "sku": sku, 
-                                "qtd": int(qtd), # Garante que é inteiro
-                                "valor_unit": float(preco), # Garante que é float
-                                "origem": origem
-                            }
-                        c += 1
-                
-                st.session_state.pedido_ativo["itens"] = list(curr_skus_dict.values())
-                st.toast(f"{c} itens do PDF adicionados ou somados ao pedido!", icon="🛒")
-
+        if df_pdf_bruto.empty:
+            st.error("Não consegui ler itens no PDF.")
         else:
-            st.warning("Não foi possível extrair SKUs do PDF.")
-    else:
-        st.info("Aguardando upload do PDF de Full.")
+            # ================= LÓGICA DE EXPLOSÃO =================
+            if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
+                 st.error("Padrão de produtos não carregado. Não consigo explodir kits. Por favor, carregue na barra lateral.")
+            else:
+                cat_obj = Catalogo(st.session_state.catalogo_df, st.session_state.kits_df)
+                kits_validos = construir_kits_efetivo(cat_obj)
+                
+                # 2. Explode o PDF (Transforma 'Qtd_Envio' de Kits em 'Quantidade' de componentes)
+                df_exploded = explodir_por_kits(df_pdf_bruto, kits_validos, "SKU", "Qtd_Envio")
+                
+                df_exploded = df_exploded.rename(columns={"Quantidade": "Qtd_Necessaria_Envio"})
+                
+                # 3. Cruzamento com Estoque Físico (df_res vem da Tab 2, com Preco e Estoque_Fisico)
+                # CRÍTICO: Mesclamos com o resultado da análise para obter o preço, fornecedor e estoque físico.
+                cols_to_merge = ["SKU", "Estoque_Fisico", "fornecedor", "Preco"]
+                df_merged = df_exploded.merge(df_res[cols_to_merge], on="SKU", how="left")
+                
+                # Tratamento de Nulos e Tipos
+                df_merged["Estoque_Fisico"] = df_merged["Estoque_Fisico"].fillna(0).astype(int)
+                df_merged["Preco"] = pd.to_numeric(df_merged["Preco"], errors='coerce').fillna(0.0)
+                df_merged["fornecedor"] = df_merged["fornecedor"].fillna("Não Cadastrado")
+                
+                # Cálculo do que falta (CRÍTICO: Objetivo da aba)
+                df_merged["Faltam_Comprar"] = (df_merged["Qtd_Necessaria_Envio"] - df_merged["Estoque_Fisico"]).clip(lower=0).astype(int)
+                
+                # CÁLCULOS DE CUSTO (Exigidos pelo usuário)
+                df_merged["Custo_Total_Envio"] = (df_merged["Qtd_Necessaria_Envio"] * df_merged["Preco"]).round(2)
+                df_merged["Valor_Compra_Faltante"] = (df_merged["Faltam_Comprar"] * df_merged["Preco"]).round(2)
+                
+                st.write(f"### Resultado da Análise (Kits Explodidos: {len(df_pdf_bruto)} Kits -> {len(df_merged)} Componentes)")
+                
+                # Métricas de custo (Sempre aparecem agora)
+                total_full_cost = df_merged["Custo_Total_Envio"].sum()
+                total_falta_cost = df_merged["Valor_Compra_Faltante"].sum()
+
+                st.markdown("#### Análise de Custos")
+                col_c1, col_c2, col_c3 = st.columns(3)
+
+                col_c1.metric(
+                    "Gasto Total para o Full (R$)", 
+                    format_br_currency(total_full_cost),
+                    help="Custo de reposição (Preço) de todas as peças (componentes) necessárias para este envio."
+                )
+
+                col_c2.metric(
+                    "Gasto Compra Faltante (R$)", 
+                    format_br_currency(total_falta_cost),
+                    help="Custo (Preço) da compra extra que você precisa fazer para atender este envio."
+                )
+                
+                col_c3.metric(
+                    "Itens Faltantes (Un)",
+                    format_br_int(df_merged['Faltam_Comprar'].sum()),
+                    help="Total de peças individuais que faltam no seu estoque físico para este envio."
+                )
+                
+                # Tabela
+                def highlight_falta(s):
+                    return ['background-color: #8B0000; color: white' if v > 0 else '' for v in s]
+
+                cols_view = ["SKU", "Qtd_Necessaria_Envio", "Estoque_Fisico", "Faltam_Comprar", "Preco", "Valor_Compra_Faltante", "fornecedor"]
+                
+                format_map = {
+                    "Qtd_Necessaria_Envio": lambda x: format_br_int(x),
+                    "Estoque_Fisico": lambda x: format_br_int(x),
+                    "Faltam_Comprar": lambda x: format_br_int(x),
+                    "Preco": lambda x: format_br_currency(x),
+                    "Valor_Compra_Faltante": lambda x: format_br_currency(x),
+                }
+
+                st.dataframe(
+                    df_merged[cols_view].style
+                        .format(format_map)
+                        .apply(highlight_falta, subset=["Faltam_Comprar"]),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Qtd_Necessaria_Envio": st.column_config.NumberColumn("Qtd P/ Enviar (Peças)", format="%d"),
+                        "Estoque_Fisico": st.column_config.NumberColumn("Estoque Físico", format="%d"),
+                        "Faltam_Comprar": st.column_config.NumberColumn("🛑 Faltam Comprar", format="%d"),
+                        "Preco": st.column_config.NumberColumn("Preço Unitário", format="R$ %.2f"),
+                        "Valor_Compra_Faltante": st.column_config.NumberColumn("Valor Compra Faltante", format="R$ %.2f")
+                    }
+                )
+                
+                total_falta = df_merged["Faltam_Comprar"].sum()
+                if total_falta > 0:
+                    if st.button(f"🛒 Adicionar {format_br_int(total_falta)} peças faltantes ao Pedido", type="primary"):
+                        add_to_cart_full(df_merged, emp_pdf)
+                else:
+                    st.balloons()
+                    st.success("✅ Você tem estoque físico suficiente para este envio!")
 
 # --- TAB 4: EDITOR OC (ANTIGA TAB 3 - CORRIGIDA PARA ADIÇÃO MANUAL) ---
 with tab4:
