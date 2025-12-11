@@ -6,3 +6,4 @@ requests
 unidecode
 supabase
 XlsxWriter
+pdfplumber
