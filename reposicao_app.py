@@ -6,19 +6,24 @@ import datetime as dt
 import pdfplumber
 import re
 import io
+import numpy as np # Import necessário para explodir_por_kits funcionar corretamente
 
 # Imports internos
 from src.config import DEFAULT_SHEET_LINK
-from src.utils import style_df_compra, norm_sku, format_br_currency
+from src.utils import style_df_compra, norm_sku, format_br_currency, format_br_int
 from src.data import get_local_file_path, get_local_name_path, load_any_table_from_bytes, carregar_padrao_local_ou_sheets, _carregar_padrao_de_content
-# ADICIONEI: explodir_por_kits e construir_kits_efetivo na importação
+# Importei explicitamente as funções de kit
 from src.logic import Catalogo, mapear_colunas, calcular, explodir_por_kits, construir_kits_efetivo
 from src.orders_db import gerar_numero_oc, salvar_pedido, listar_pedidos, atualizar_status, excluir_pedido_db
 
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
-# ===================== FUNÇÃO DE LEITURA PDF (MANTIDA) =====================
+# ===================== FUNÇÃO DE LEITURA PDF (CORRIGIDA) =====================
 def extrair_dados_pdf_ml(pdf_bytes):
+    """
+    Lê o PDF de envio do ML usando extração de TABELA para evitar confundir
+    EAN/Código de Barras com a Quantidade.
+    """
     data = []
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -29,14 +34,18 @@ def extrair_dados_pdf_ml(pdf_bytes):
                         if not row or len(row) < 2: continue
                         col_produto = str(row[0])
                         col_qtd = str(row[1])
+                        
+                        # Tenta achar SKU: no texto (ignora maiúsculas/minúsculas)
                         match_sku = re.search(r'SKU:?\s*([\w\-\/]+)', col_produto, re.IGNORECASE)
                         qtd_limpa = re.sub(r'[^\d]', '', col_qtd)
+                        
                         if match_sku and qtd_limpa:
                             sku = match_sku.group(1)
                             qty = int(qtd_limpa)
                             if qty < 100000: 
                                 data.append({"SKU": norm_sku(sku), "Qtd_Envio": qty})
                 else:
+                    # Fallback para PDF sem tabela explícita (versão anterior)
                     text = page.extract_text()
                     if not text: continue
                     lines = text.split('\n')
@@ -100,6 +109,7 @@ def update_sel(k_wid, k_sku, d_sel):
         if "Selecionar" in c and i < len(skus): d_sel[skus[i]] = c["Selecionar"]
 
 def add_to_cart_full(df_source, emp):
+    """Adiciona itens ao carrinho baseado na coluna 'Faltam_Comprar'"""
     if df_source is None or df_source.empty: return
     if "Faltam_Comprar" not in df_source.columns: return
 
@@ -160,15 +170,16 @@ with st.sidebar:
     st.subheader("📂 Dados Mestre")
     if st.button("🔄 Baixar do Google Sheets"):
         try:
-            c, origem = carregar_padrao_local_ou_sheets(DEFAULT_SHEET_LINK)
+            c, _ = carregar_padrao_local_ou_sheets(DEFAULT_SHEET_LINK)
             st.session_state.catalogo_df = c.catalogo_simples.rename(columns={"component_sku":"sku"})
             st.session_state.kits_df = c.kits_reais
-            st.success(f"Carregado via {origem}!")
-        except Exception as e: 
-            st.error(f"Erro: {e}"); st.warning("Use o upload manual abaixo.")
+            st.success("OK!")
+        except Exception as e: st.error(str(e))
+        
     up_manual = st.file_uploader("Ou 'Padrao_produtos.xlsx' manual:", type=["xlsx"])
     if up_manual:
         try:
+            from src.data import _carregar_padrao_de_content
             c = _carregar_padrao_de_content(up_manual.getvalue())
             st.session_state.catalogo_df = c.catalogo_simples.rename(columns={"component_sku":"sku"})
             st.session_state.kits_df = c.kits_reais
@@ -240,7 +251,7 @@ with tab2:
                 st.data_editor(style_df_compra(df[cols]), key=f"ed_{emp}", use_container_width=True, hide_index=True, column_config={"Selecionar": st.column_config.CheckboxColumn(default=False)}, on_change=update_sel, args=(f"ed_{emp}", k_sku, sel))
                 if st.button(f"🛒 Add ao Pedido ({emp})", key=f"bt_{emp}"): add_to_cart(emp)
 
-# --- TAB 3: CRUZAMENTO PDF FULL (CORRIGIDA - EXPLOSÃO + COR) ---
+# --- TAB 3: CRUZAMENTO PDF FULL (AGORA COM CUSTOS) ---
 with tab3:
     st.header("🚛 Cruzar PDF de Envio vs Estoque Físico")
     st.info("O sistema agora separa os Kits e mostra os componentes (SKU simples) que faltam.")
@@ -260,7 +271,6 @@ with tab3:
             st.error("Não consegui ler itens no PDF.")
         else:
             # ================= LÓGICA DE EXPLOSÃO =================
-            # 1. Recupera a estrutura de Kits
             if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
                  st.error("Padrão de produtos não carregado. Não consigo explodir kits.")
             else:
@@ -278,26 +288,69 @@ with tab3:
                 
                 # Tratamento de Nulos
                 df_merged["Estoque_Fisico"] = df_merged["Estoque_Fisico"].fillna(0).astype(int)
-                df_merged["Preco"] = df_merged["Preco"].fillna(0)
+                df_merged["Preco"] = df_merged["Preco"].fillna(0.0)
                 
                 # Cálculo do que falta
-                df_merged["Faltam_Comprar"] = (df_merged["Qtd_Necessaria_Envio"] - df_merged["Estoque_Fisico"]).clip(lower=0)
+                df_merged["Faltam_Comprar"] = (df_merged["Qtd_Necessaria_Envio"] - df_merged["Estoque_Fisico"]).clip(lower=0).astype(int)
+                
+                # CÁLCULOS DE CUSTO (NOVOS)
+                df_merged["Custo_Total_Envio"] = (df_merged["Qtd_Necessaria_Envio"] * df_merged["Preco"]).round(2)
+                df_merged["Valor_Compra_Faltante"] = (df_merged["Faltam_Comprar"] * df_merged["Preco"]).round(2)
                 
                 st.write(f"### Resultado da Análise (Kits Explodidos: {len(df_pdf)} -> {len(df_merged)} itens)")
+                
+                # Métricas de custo
+                total_full_cost = df_merged["Custo_Total_Envio"].sum()
+                total_falta_cost = df_merged["Valor_Compra_Faltante"].sum()
+
+                st.markdown("#### Análise de Custos")
+                col_c1, col_c2, col_c3 = st.columns(3)
+
+                col_c1.metric(
+                    "Gasto Total para o Full", 
+                    format_br_currency(total_full_cost),
+                    help="Custo de reposição (Preço) de todas as peças necessárias para este envio."
+                )
+
+                col_c2.metric(
+                    "Gasto Compra Faltante", 
+                    format_br_currency(total_falta_cost),
+                    help="Custo (Preço) da compra extra que você precisa fazer para atender este envio."
+                )
+                
+                col_c3.metric(
+                    "Itens Faltantes (Un)",
+                    f"{int(df_merged['Faltam_Comprar'].sum()):,}".replace(",", "."),
+                    help="Total de peças individuais que faltam no seu estoque físico para este envio."
+                )
                 
                 # NOVA COR (Vermelho Escuro com Texto Branco)
                 def highlight_falta(s):
                     return ['background-color: #8B0000; color: white' if v > 0 else '' for v in s]
 
-                # Mostra tabela
-                cols_view = ["SKU", "Qtd_Necessaria_Envio", "Estoque_Fisico", "Faltam_Comprar", "fornecedor"]
+                # Aplica a formatação de INTEIRO e mostra tabela
+                cols_view = ["SKU", "Qtd_Necessaria_Envio", "Estoque_Fisico", "Faltam_Comprar", "Preco", "Valor_Compra_Faltante", "fornecedor"]
+                
+                # Mapeamento de formatação para remover os zeros e formatar moeda
+                format_map = {
+                    "Qtd_Necessaria_Envio": lambda x: format_br_int(x),
+                    "Estoque_Fisico": lambda x: format_br_int(x),
+                    "Faltam_Comprar": lambda x: format_br_int(x),
+                    "Preco": lambda x: format_br_currency(x),
+                    "Valor_Compra_Faltante": lambda x: format_br_currency(x),
+                }
+
                 st.dataframe(
-                    df_merged[cols_view].style.apply(highlight_falta, subset=["Faltam_Comprar"]),
+                    df_merged[cols_view].style
+                        .format(format_map)
+                        .apply(highlight_falta, subset=["Faltam_Comprar"]),
                     use_container_width=True,
                     hide_index=True,
                     column_config={
                         "Qtd_Necessaria_Envio": st.column_config.NumberColumn("Qtd P/ Enviar (Peças)"),
-                        "Faltam_Comprar": st.column_config.NumberColumn("🛑 Faltam Comprar")
+                        "Faltam_Comprar": st.column_config.NumberColumn("🛑 Faltam Comprar"),
+                        "Preco": st.column_config.NumberColumn("Preço Unitário"),
+                        "Valor_Compra_Faltante": st.column_config.NumberColumn("Valor Compra Faltante")
                     }
                 )
                 
