@@ -11,80 +11,49 @@ import io
 from src.config import DEFAULT_SHEET_LINK
 from src.utils import style_df_compra, norm_sku, format_br_currency
 from src.data import get_local_file_path, get_local_name_path, load_any_table_from_bytes, carregar_padrao_local_ou_sheets, _carregar_padrao_de_content
-from src.logic import Catalogo, mapear_colunas, calcular
+# ADICIONEI: explodir_por_kits e construir_kits_efetivo na importação
+from src.logic import Catalogo, mapear_colunas, calcular, explodir_por_kits, construir_kits_efetivo
 from src.orders_db import gerar_numero_oc, salvar_pedido, listar_pedidos, atualizar_status, excluir_pedido_db
 
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
-# ===================== NOVA FUNÇÃO DE LEITURA (CORRIGIDA) =====================
+# ===================== FUNÇÃO DE LEITURA PDF (MANTIDA) =====================
 def extrair_dados_pdf_ml(pdf_bytes):
-    """
-    Lê o PDF de envio do ML usando extração de TABELA para evitar confundir
-    EAN/Código de Barras com a Quantidade.
-    """
     data = []
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for page in pdf.pages:
-                # Tenta extrair a estrutura de tabela da página
                 tabela = page.extract_table()
-                
                 if tabela:
-                    # Se achou tabela, processa linha a linha
                     for row in tabela:
-                        # O PDF do ML geralmente tem colunas: [PRODUTO, UNIDADES, IDENTIFICAÇÃO, ...]
-                        # Precisamos de pelo menos 2 colunas preenchidas
-                        if not row or len(row) < 2:
-                            continue
-                            
-                        col_produto = str(row[0])  # Texto cheio de coisas (SKU, EAN, Nome)
-                        col_qtd = str(row[1])      # Deveria ser só o número
-                        
-                        # 1. Tenta achar o SKU dentro da bagunça da coluna 1
-                        # Procura por "SKU:" seguido de algo
+                        if not row or len(row) < 2: continue
+                        col_produto = str(row[0])
+                        col_qtd = str(row[1])
                         match_sku = re.search(r'SKU:?\s*([\w\-\/]+)', col_produto, re.IGNORECASE)
-                        
-                        # 2. Limpa a quantidade (remove letras, espaços, pontos)
-                        # Ex: "16\nUnidades" vira "16"
                         qtd_limpa = re.sub(r'[^\d]', '', col_qtd)
-                        
                         if match_sku and qtd_limpa:
                             sku = match_sku.group(1)
                             qty = int(qtd_limpa)
-                            
-                            # Filtro de segurança: Se a quantidade for gigantesca, 
-                            # ainda pode ser um erro de leitura (ex: pegou um EAN na coluna errada)
                             if qty < 100000: 
                                 data.append({"SKU": norm_sku(sku), "Qtd_Envio": qty})
-                                
                 else:
-                    # FALLBACK: Se não achou tabela (layout quebrou), usa texto corrido mas ignora números grandes
                     text = page.extract_text()
                     if not text: continue
                     lines = text.split('\n')
                     for line in lines:
                         parts = line.split()
                         if len(parts) < 2: continue
-                        
-                        # Tenta achar SKU
-                        sku_cand = None
-                        qtd_cand = 0
-                        
-                        # Procura SKU explicito
                         match_sku_txt = re.search(r'SKU:?\s*([\w\-\/]+)', line, re.IGNORECASE)
                         if match_sku_txt:
                             sku_cand = match_sku_txt.group(1)
-                            
-                            # Tenta achar um número na linha que NÃO seja EAN (menor que 5 digitos)
-                            # Varre de trás pra frente
+                            qtd_cand = 0
                             for p in reversed(parts):
                                 p_clean = re.sub(r'[^\d]', '', p)
                                 if p_clean.isdigit():
                                     val = int(p_clean)
-                                    if 0 < val < 20000: # Assumimos que ninguém envia 20 mil peças de um SKU
+                                    if 0 < val < 20000:
                                         qtd_cand = val
                                         break
-                            
                             if sku_cand and qtd_cand > 0:
                                 data.append({"SKU": norm_sku(sku_cand), "Qtd_Envio": qtd_cand})
 
@@ -131,28 +100,18 @@ def update_sel(k_wid, k_sku, d_sel):
         if "Selecionar" in c and i < len(skus): d_sel[skus[i]] = c["Selecionar"]
 
 def add_to_cart_full(df_source, emp):
-    """Adiciona itens ao carrinho baseado na coluna 'Faltam_Comprar'"""
     if df_source is None or df_source.empty: return
-    
-    # Filtra apenas o que precisa comprar
-    if "Faltam_Comprar" not in df_source.columns:
-        st.error("Erro: Coluna 'Faltam_Comprar' não encontrada.")
-        return
+    if "Faltam_Comprar" not in df_source.columns: return
 
     df_buy = df_source[df_source["Faltam_Comprar"] > 0].copy()
-    if df_buy.empty:
-        st.toast("Nada faltante para comprar!", icon="✅")
-        return
+    if df_buy.empty: return st.toast("Nada faltante para comprar!", icon="✅")
 
     curr = st.session_state.pedido_ativo["itens"]
     curr_skus = [i["sku"] for i in curr]
     c = 0
     for _, r in df_buy.iterrows():
         if r["SKU"] not in curr_skus:
-            # Busca preço se disponível
-            preco = 0.0
-            if "Preco" in r: preco = float(r["Preco"])
-            
+            preco = float(r["Preco"]) if "Preco" in r else 0.0
             curr.append({
                 "sku": r["SKU"], 
                 "qtd": int(r["Faltam_Comprar"]), 
@@ -160,11 +119,9 @@ def add_to_cart_full(df_source, emp):
                 "origem": f"FULL_{emp}"
             })
             c += 1
-            
     st.session_state.pedido_ativo["itens"] = curr
     if not st.session_state.pedido_ativo["fornecedor"] and "fornecedor" in df_buy.columns:
          st.session_state.pedido_ativo["fornecedor"] = df_buy.iloc[0]["fornecedor"]
-         
     st.toast(f"{c} itens adicionados ao pedido!", icon="🛒")
 
 def add_to_cart(emp):
@@ -283,10 +240,10 @@ with tab2:
                 st.data_editor(style_df_compra(df[cols]), key=f"ed_{emp}", use_container_width=True, hide_index=True, column_config={"Selecionar": st.column_config.CheckboxColumn(default=False)}, on_change=update_sel, args=(f"ed_{emp}", k_sku, sel))
                 if st.button(f"🛒 Add ao Pedido ({emp})", key=f"bt_{emp}"): add_to_cart(emp)
 
-# --- TAB 3: CRUZAMENTO PDF FULL (NOVA LÓGICA) ---
+# --- TAB 3: CRUZAMENTO PDF FULL (CORRIGIDA - EXPLOSÃO + COR) ---
 with tab3:
     st.header("🚛 Cruzar PDF de Envio vs Estoque Físico")
-    st.info("Faça upload do PDF gerado pelo Mercado Livre. O sistema vai verificar se você tem estoque para enviar.")
+    st.info("O sistema agora separa os Kits e mostra os componentes (SKU simples) que faltam.")
     
     emp_pdf = st.radio("Empresa do Envio:", ["ALIVVIA", "JCA"], horizontal=True)
     pdf_file = st.file_uploader("Arrastar PDF do Envio Full", type=["pdf"])
@@ -296,47 +253,61 @@ with tab3:
     if df_res is None:
         st.warning(f"⚠️ Primeiro vá na aba 'Análise & Compra' e clique em 'Calc {emp_pdf}' para carregar o Estoque Físico atual.")
     elif pdf_file:
-        st.write("Lendo PDF...")
-        # Chama a nova função corrigida
+        st.write("Lendo PDF e explodindo kits...")
         df_pdf = extrair_dados_pdf_ml(pdf_file.getvalue())
         
         if df_pdf.empty:
-            st.error("Não consegui ler itens no PDF. Verifique se é um arquivo de envio válido.")
+            st.error("Não consegui ler itens no PDF.")
         else:
-            st.success(f"Encontrados {len(df_pdf)} itens no PDF.")
-            
-            # Cruzamento
-            df_merged = df_pdf.merge(df_res[["SKU", "Estoque_Fisico", "fornecedor", "Preco"]], on="SKU", how="left")
-            
-            # Se não achou no estoque fisico, assume 0
-            df_merged["Estoque_Fisico"] = df_merged["Estoque_Fisico"].fillna(0).astype(int)
-            df_merged["Preco"] = df_merged["Preco"].fillna(0)
-            
-            # Lógica: O que falta?
-            df_merged["Faltam_Comprar"] = (df_merged["Qtd_Envio"] - df_merged["Estoque_Fisico"]).clip(lower=0)
-            
-            st.write("### Resultado da Análise do PDF")
-            
-            def highlight_falta(s):
-                return ['background-color: #ffcccc' if v > 0 else '' for v in s]
-
-            st.dataframe(
-                df_merged[["SKU", "Qtd_Envio", "Estoque_Fisico", "Faltam_Comprar", "fornecedor"]].style.apply(highlight_falta, subset=["Faltam_Comprar"]),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Qtd_Envio": st.column_config.NumberColumn("Qtd no PDF"),
-                    "Faltam_Comprar": st.column_config.NumberColumn("🛑 Faltam Comprar")
-                }
-            )
-            
-            total_falta = df_merged["Faltam_Comprar"].sum()
-            if total_falta > 0:
-                if st.button(f"🛒 Adicionar {int(total_falta)} itens faltantes ao Pedido de Compra", type="primary"):
-                    add_to_cart_full(df_merged, emp_pdf)
+            # ================= LÓGICA DE EXPLOSÃO =================
+            # 1. Recupera a estrutura de Kits
+            if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
+                 st.error("Padrão de produtos não carregado. Não consigo explodir kits.")
             else:
-                st.balloons()
-                st.success("✅ Você tem estoque físico suficiente para este envio!")
+                cat_obj = Catalogo(st.session_state.catalogo_df.rename(columns={"sku":"component_sku"}), st.session_state.kits_df)
+                kits_validos = construir_kits_efetivo(cat_obj)
+                
+                # 2. Explode o PDF (Transforma 'Qtd_Envio' de Kits em 'Quantidade' de componentes)
+                df_exploded = explodir_por_kits(df_pdf, kits_validos, "SKU", "Qtd_Envio")
+                
+                # Renomeia para clareza
+                df_exploded = df_exploded.rename(columns={"Quantidade": "Qtd_Necessaria_Envio"})
+                
+                # 3. Cruzamento com Estoque Físico
+                df_merged = df_exploded.merge(df_res[["SKU", "Estoque_Fisico", "fornecedor", "Preco"]], on="SKU", how="left")
+                
+                # Tratamento de Nulos
+                df_merged["Estoque_Fisico"] = df_merged["Estoque_Fisico"].fillna(0).astype(int)
+                df_merged["Preco"] = df_merged["Preco"].fillna(0)
+                
+                # Cálculo do que falta
+                df_merged["Faltam_Comprar"] = (df_merged["Qtd_Necessaria_Envio"] - df_merged["Estoque_Fisico"]).clip(lower=0)
+                
+                st.write(f"### Resultado da Análise (Kits Explodidos: {len(df_pdf)} -> {len(df_merged)} itens)")
+                
+                # NOVA COR (Vermelho Escuro com Texto Branco)
+                def highlight_falta(s):
+                    return ['background-color: #8B0000; color: white' if v > 0 else '' for v in s]
+
+                # Mostra tabela
+                cols_view = ["SKU", "Qtd_Necessaria_Envio", "Estoque_Fisico", "Faltam_Comprar", "fornecedor"]
+                st.dataframe(
+                    df_merged[cols_view].style.apply(highlight_falta, subset=["Faltam_Comprar"]),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Qtd_Necessaria_Envio": st.column_config.NumberColumn("Qtd P/ Enviar (Peças)"),
+                        "Faltam_Comprar": st.column_config.NumberColumn("🛑 Faltam Comprar")
+                    }
+                )
+                
+                total_falta = df_merged["Faltam_Comprar"].sum()
+                if total_falta > 0:
+                    if st.button(f"🛒 Adicionar {int(total_falta)} peças faltantes ao Pedido", type="primary"):
+                        add_to_cart_full(df_merged, emp_pdf)
+                else:
+                    st.balloons()
+                    st.success("✅ Você tem estoque físico suficiente para este envio!")
 
 # --- TAB 4: EDITOR ---
 with tab4:
