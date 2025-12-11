@@ -3,17 +3,17 @@ import pandas as pd
 import streamlit as st
 import time
 import datetime as dt
-import pdfplumber
-import re
-import io
-import numpy as np # Import necessário para explodir_por_kits funcionar corretamente
+import pdfplumber # Necessário para ler PDF
+import re # Necessário para ler PDF
+import io # Necessário para ler PDF
+import numpy as np # Necessário para lógica dos kits
 
 # Imports internos
 from src.config import DEFAULT_SHEET_LINK
-from src.utils import style_df_compra, norm_sku, format_br_currency, format_br_int
+from src.utils import style_df_compra, norm_sku, format_br_currency, format_br_int # format_br_int agora está aqui
 from src.data import get_local_file_path, get_local_name_path, load_any_table_from_bytes, carregar_padrao_local_ou_sheets, _carregar_padrao_de_content
-# Importei explicitamente as funções de kit
-from src.logic import Catalogo, mapear_colunas, calcular, explodir_por_kits, construir_kits_efetivo
+# FUNÇÕES DE LÓGICA CORRETAS (incluindo as de Kit)
+from src.logic import Catalogo, mapear_colunas, calcular, explodir_por_kits, construir_kits_efetivo 
 from src.orders_db import gerar_numero_oc, salvar_pedido, listar_pedidos, atualizar_status, excluir_pedido_db
 
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -35,7 +35,6 @@ def extrair_dados_pdf_ml(pdf_bytes):
                         col_produto = str(row[0])
                         col_qtd = str(row[1])
                         
-                        # Tenta achar SKU: no texto (ignora maiúsculas/minúsculas)
                         match_sku = re.search(r'SKU:?\s*([\w\-\/]+)', col_produto, re.IGNORECASE)
                         qtd_limpa = re.sub(r'[^\d]', '', col_qtd)
                         
@@ -45,7 +44,6 @@ def extrair_dados_pdf_ml(pdf_bytes):
                             if qty < 100000: 
                                 data.append({"SKU": norm_sku(sku), "Qtd_Envio": qty})
                 else:
-                    # Fallback para PDF sem tabela explícita (versão anterior)
                     text = page.extract_text()
                     if not text: continue
                     lines = text.split('\n')
@@ -98,6 +96,8 @@ def _ensure_state():
                         with open(n, 'r') as f: st.session_state[emp][ft]["name"] = f.read().strip()
                 except: pass
 _ensure_state()
+# (O restante do seu reposicao_app.py deve vir daqui para baixo)
+# ...
 
 # ===================== FUNÇÕES UI =====================
 def reset_selection(): st.session_state.sel_A = {}; st.session_state.sel_J = {}
