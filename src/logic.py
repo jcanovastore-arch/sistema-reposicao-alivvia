@@ -1,4 +1,3 @@
-# src/logic.py
 import pandas as pd
 import numpy as np
 from dataclasses import dataclass
@@ -46,14 +45,9 @@ def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, col_sku_in: str, col
     return grouped.rename(columns={"component_sku": "SKU", "qtd_final": "Quantidade"})
 
 def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
-    """
-    Recebe o DF já com colunas limpas pelo data.py (ex: estoque_atual)
-    e retorna o DF padronizado para o sistema.
-    """
     df = df.copy()
     cols = list(df.columns)
     
-    # Função auxiliar para achar coluna por parte do nome
     def find_col(keywords):
         for c in cols:
             if all(k in c for k in keywords): return c
@@ -65,12 +59,10 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
     
     df["SKU"] = df[col_sku].map(norm_sku)
     
-    # Helper seguro para números
     def safe_num(x):
         return br_to_float(x) if x else 0
 
     if tipo == "FISICO":
-        # Procura por estoque_atual (nome limpo)
         col_est = find_col(["estoque", "atual"]) 
         if not col_est: col_est = find_col(["estoque", "disponivel"])
         if not col_est: col_est = find_col(["saldo"])
@@ -83,8 +75,6 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
             df["Estoque_Fisico"] = 0
             
         df["Preco"] = df[col_prc].apply(safe_num).fillna(0.0) if col_prc else 0.0
-        
-        # Retorna apenas colunas essenciais, sem somar (evita duplicar se houver linhas repetidas erradas)
         return df.drop_duplicates(subset=["SKU"])[["SKU", "Estoque_Fisico", "Preco"]]
 
     elif tipo == "FULL":
@@ -95,7 +85,6 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
         df["Vendas_Qtd_60d"] = df[col_vendas].apply(safe_num).fillna(0).astype(int) if col_vendas else 0
         df["Estoque_Full"] = df[col_full].apply(safe_num).fillna(0).astype(int) if col_full else 0
         df["Em_Transito"] = df[col_trans].apply(safe_num).fillna(0).astype(int) if col_trans else 0
-        
         return df.drop_duplicates(subset=["SKU"])[["SKU", "Vendas_Qtd_60d", "Estoque_Full", "Em_Transito"]]
 
     elif tipo == "VENDAS":
@@ -122,25 +111,23 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     fis = fisico_df.copy(); fis["SKU"] = fis["SKU"].map(norm_sku)
     shp = vendas_df.copy(); shp["SKU"] = shp["SKU"].map(norm_sku)
     
-    # 2. Explosão Vendas (Kits -> Componentes)
+    # 2. Explosão Vendas
     ml_comp = explodir_por_kits(full, kits, "SKU", "Vendas_Qtd_60d").rename(columns={"Quantidade": "ML_60d"})
     shp_comp = explodir_por_kits(shp, kits, "SKU", "Quantidade").rename(columns={"Quantidade": "Shopee_60d"})
     
     # 3. Base Mestra
     base = cat.catalogo_simples[["component_sku", "fornecedor"]].rename(columns={"component_sku": "SKU"}).drop_duplicates()
     
-    # Juntas as vendas
     base = base.merge(ml_comp, on="SKU", how="left").merge(shp_comp, on="SKU", how="left").fillna(0)
     base["TOTAL_60d"] = np.maximum(base["ML_60d"] + base["Shopee_60d"], base["ML_60d"]).astype(int)
     base["Vendas_Total_60d"] = base["TOTAL_60d"]
     
-    # 4. Merge Estoque Físico (Valor Bruto, sem contas)
+    # 4. Merge Estoque Físico
     base = base.merge(fis, on="SKU", how="left")
     base["Estoque_Fisico"] = base["Estoque_Fisico"].fillna(0).astype(int)
     base["Preco"] = base["Preco"].fillna(0.0)
     
-    # 5. Cálculo Sugestão de Compra
-    # Full e Transito (Kits) para calculo de envio
+    # 5. Cálculo Sugestão
     fator = (1.0 + g/100.0) ** (h/30.0)
     fk = full.copy()
     fk["venda_dia"] = fk["Vendas_Qtd_60d"] / 60.0
@@ -154,19 +141,26 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     base = base.merge(nec, on="SKU", how="left")
     base["Necessidade"] = base["Necessidade"].fillna(0).astype(int)
     
-    # Reserva de 30 dias (apenas para cálculo, não visual)
+    # Reserva de 30 dias (para Alocação e Cálculo)
     base["Reserva_30d"] = np.round((base["TOTAL_60d"]/60.0) * 30).astype(int)
     livre_virtual = (base["Estoque_Fisico"] - base["Reserva_30d"]).clip(lower=0)
     
     base["Compra_Sugerida"] = (base["Necessidade"] - livre_virtual).clip(lower=0).astype(int)
     base["Valor_Compra_R$"] = (base["Compra_Sugerida"] * base["Preco"]).round(2)
     
-    # 6. Visual Full (Traz estoque full explodido para mostrar na tabela)
+    # 6. Visual Full
     full_vis = explodir_por_kits(full, kits, "SKU", "Estoque_Full").rename(columns={"Quantidade": "Estoque_Full_Real"})
     full_vis = full_vis.groupby("SKU", as_index=False)["Estoque_Full_Real"].sum()
     
     base = base.merge(full_vis, on="SKU", how="left")
     base["Estoque_Full"] = base["Estoque_Full_Real"].fillna(0).astype(int)
     
-    cols = ["SKU", "fornecedor", "Vendas_Total_60d", "Estoque_Full", "Estoque_Fisico", "Preco", "Compra_Sugerida", "Valor_Compra_R$"]
+    # LISTA DE COLUNAS A RETORNAR (AQUI ESTAVA O ERRO)
+    # Adicionei 'Reserva_30d' e 'Necessidade' que a aba de Alocação precisa
+    cols = [
+        "SKU", "fornecedor", "Vendas_Total_60d", 
+        "Estoque_Full", "Estoque_Fisico", "Preco", 
+        "Compra_Sugerida", "Valor_Compra_R$", 
+        "Em_Transito", "Reserva_30d", "Necessidade" 
+    ]
     return base[[c for c in cols if c in base.columns]].reset_index(drop=True), {}
