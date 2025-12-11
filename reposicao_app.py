@@ -31,6 +31,7 @@ def _ensure_state():
         if emp not in st.session_state: st.session_state[emp] = {}
         for ft in ["FULL", "VENDAS", "ESTOQUE"]:
             if ft not in st.session_state[emp]: st.session_state[emp][ft] = {"name": None, "bytes": None}
+            # Tenta carregar cache local
             if not st.session_state[emp][ft]["name"]:
                 try:
                     p = get_local_file_path(emp, ft)
@@ -68,6 +69,27 @@ def add_to_cart(emp):
     if not st.session_state.pedido_ativo["fornecedor"] and not novos.empty:
         st.session_state.pedido_ativo["fornecedor"] = novos.iloc[0]["fornecedor"]
     st.toast(f"{c} itens adicionados!")
+    
+def clear_file_cache(empresa, tipo):
+    """Remove o arquivo .bin e .txt do cache local"""
+    file_path = get_local_file_path(empresa, tipo)
+    name_path = get_local_name_path(empresa, tipo)
+    
+    deleted = False
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        deleted = True
+    if os.path.exists(name_path):
+        os.remove(name_path)
+        deleted = True
+        
+    st.session_state[empresa][tipo]["name"] = None
+    st.session_state[empresa][tipo]["bytes"] = None
+    
+    if deleted:
+        st.toast(f"Cache de {empresa} {tipo} limpo!", icon="🧹")
+        time.sleep(1)
+        st.rerun()
 
 # ===================== SIDEBAR =====================
 with st.sidebar:
@@ -89,20 +111,29 @@ if st.session_state.catalogo_df is None: st.warning("Carregue o Padrão no menu 
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📂 Uploads", "🔍 Análise & Compra", "📝 Editor OC", "🗂️ Gestão", "📦 Alocação"])
 
-# --- TAB 1: UPLOADS ---
+# --- TAB 1: UPLOADS (COM BOTÃO DE LIMPEZA) ---
 with tab1:
     c1, c2 = st.columns(2)
     def up_block(emp, col):
         with col:
             st.subheader(emp)
             for ft in ["FULL", "VENDAS", "ESTOQUE"]:
+                curr_state = st.session_state[emp][ft]
+                
                 f = st.file_uploader(ft, key=f"u_{emp}_{ft}")
+                
                 if f:
                     with open(get_local_file_path(emp, ft), 'wb') as fb: fb.write(f.read())
                     with open(get_local_name_path(emp, ft), 'w') as fn: fn.write(f.name)
                     st.session_state[emp][ft] = {"name": f.name, "bytes": f.getvalue()}
                     st.success("Salvo!")
-                if st.session_state[emp][ft]["name"]: st.caption(f"✅ {st.session_state[emp][ft]['name']}")
+                
+                if curr_state["name"]:
+                    col_name, col_btn = st.columns([3, 1])
+                    col_name.caption(f"✅ {curr_state['name']}")
+                    if col_btn.button("🧹 Limpar", key=f"clean_{emp}_{ft}"):
+                        clear_file_cache(emp, ft)
+
     up_block("ALIVVIA", c1); up_block("JCA", c2)
 
 # --- TAB 2: ANÁLISE E COMPRA ---
@@ -173,7 +204,10 @@ with tab2:
                     key=f"ed_{emp}", 
                     use_container_width=True, 
                     hide_index=True,
-                    column_config={"Selecionar": st.column_config.CheckboxColumn(default=False)},
+                    column_config={
+                        "Selecionar": st.column_config.CheckboxColumn(default=False),
+                        "Estoque_Fisico": st.column_config.NumberColumn("Físico (Bruto)", help="Estoque lido diretamente do arquivo.") # Mudança de label para Bruto
+                    },
                     on_change=update_sel, 
                     args=(f"ed_{emp}", k_sku, sel)
                 )
@@ -226,7 +260,7 @@ with tab4:
             
             if st.button("Excluir"): excluir_pedido_db(sel_oc); st.warning("Excluído"); time.sleep(1); st.rerun()
 
-# --- TAB 5: ALOCAÇÃO (Corrigida e Simplificada para o fluxo desejado) ---
+# --- TAB 5: ALOCAÇÃO (Simplificada) ---
 with tab5:
     st.header("📦 Alocação de Compra (JCA vs ALIVVIA)")
     
@@ -236,14 +270,11 @@ with tab5:
     if ra is None or rj is None:
         st.info("Por favor, calcule ambas as empresas na aba 'Análise' para alocar.")
     else:
-        # Prepara base para alocação (apenas SKUs de ambas as empresas)
+        # Prepara base para alocação
         df_A = ra[["SKU", "Vendas_Total_60d", "Estoque_Fisico"]].rename(columns={"Vendas_Total_60d": "Vendas_A", "Estoque_Fisico": "Estoque_A"})
         df_J = rj[["SKU", "Vendas_Total_60d", "Estoque_Fisico"]].rename(columns={"Vendas_Total_60d": "Vendas_J", "Estoque_Fisico": "Estoque_J"})
-        
-        # Merge para ter as vendas e estoques lado a lado
         base_aloc = pd.merge(df_A, df_J, on="SKU", how="outer").fillna(0)
         
-        # Filtros
         sku_aloc = st.selectbox("Selecione o SKU para Alocar:", ["Selecione um SKU"] + base_aloc["SKU"].unique().tolist())
         
         if sku_aloc != "Selecione um SKU":
@@ -255,18 +286,15 @@ with tab5:
             c2.metric("Vendas JCA (60d)", int(row["Vendas_J"]))
             c3.metric("Estoque Físico Total", int(row["Estoque_A"] + row["Estoque_J"]))
             
-            # 1. Entrada de Compra
             st.markdown("---")
             compra_total = st.number_input(f"Quantidade TOTAL de Compra para {sku_aloc}:", min_value=1, step=1, value=500)
             
-            # 2. Lógica de Alocação Simples (Baseada em Vendas 60d)
             venda_total = row["Vendas_A"] + row["Vendas_J"]
             
             if venda_total > 0:
                 perc_A = row["Vendas_A"] / venda_total
                 perc_J = row["Vendas_J"] / venda_total
             else:
-                # Se não há vendas, divide 50/50
                 perc_A = 0.5
                 perc_J = 0.5
             
@@ -276,8 +304,8 @@ with tab5:
             st.markdown("#### Alocação Sugerida (Baseado em % de Vendas 60d)")
             
             col_res1, col_res2 = st.columns(2)
-            col_res1.metric("ALIVVIA (Compra Sugerida)", f"{aloc_A:,}".replace(",", "."))
-            col_res2.metric("JCA (Compra Sugerida)", f"{aloc_J:,}".replace(",", "."))
+            col_res1.metric("ALIVVIA (Qtd)", f"{aloc_A:,}".replace(",", "."))
+            col_res2.metric("JCA (Qtd)", f"{aloc_J:,}".replace(",", "."))
             
             st.markdown("---")
-            st.warning("A sugestão de compra (Compra_Sugerida) na aba 'Análise' continua sendo o método recomendado.")
+            st.info("Esta alocação é apenas para fins de compra. As sugestões na aba 'Análise' consideram o estoque atual e a reserva.")
