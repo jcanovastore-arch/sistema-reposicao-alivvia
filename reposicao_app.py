@@ -421,12 +421,28 @@ with tab4:
         df_i["qtd"] = pd.to_numeric(df_i["qtd"], errors='coerce').fillna(0).astype(int)
         df_i["Total"] = (df_i["qtd"] * df_i["valor_unit"]).round(2)
         
+        # TENTA JUNTAR O NOME DO PRODUTO E FORNECEDOR (CONTEXTO CRUCIAL)
+        if st.session_state.catalogo_df is not None:
+             df_cat = st.session_state.catalogo_df.copy()
+             
+             # Renomeia colunas para o Join e Exibição
+             df_cat = df_cat.rename(columns={"sku": "sku", "nome_produto": "Nome do Produto", "fornecedor": "Forn. Info"})
+             
+             # Limita colunas de catálogo para o Join
+             cols_join = [c for c in ["sku", "Nome do Produto", "Forn. Info"] if c in df_cat.columns]
+             
+             # Faz o merge para adicionar as colunas de contexto
+             df_i = df_i.merge(df_cat[cols_join], on="sku", how="left")
+             
         # Colunas a exibir na ordem e nome desejados
-        df_exibir = df_i[["sku", "qtd", "valor_unit", "Total", "origem"]].copy()
+        cols_display = ["sku", "Nome do Produto", "Forn. Info", "qtd", "valor_unit", "Total", "origem"]
+        df_exibir = df_i[[c for c in cols_display if c in df_i.columns]].copy()
 
         # Configuração das colunas com formatação de moeda e número
         col_config = {
             "sku": st.column_config.TextColumn("SKU", disabled=True),
+            "Nome do Produto": st.column_config.TextColumn("Produto", disabled=True), # Não editável
+            "Forn. Info": st.column_config.TextColumn("Forn. Info", disabled=True), # Não editável
             "qtd": st.column_config.NumberColumn("Qtd", min_value=1, step=1, help="Quantidade a ser comprada", format="%d"),
             "valor_unit": st.column_config.NumberColumn("Preço Unitário (R$)", format="R$ %.2f", help="Valor de custo/compra por unidade"),
             "Total": st.column_config.NumberColumn("Total (R$)", format="R$ %.2f", disabled=True), # Não editável
@@ -442,11 +458,11 @@ with tab4:
             hide_index=True
         )
         
-        # Recalcula o total com os dados editados (garante que os valores numéricos voltem formatados)
+        # Recalcula o total com os dados editados
         tot = (ed["qtd"] * ed["valor_unit"]).sum()
         
-        # Salva o resultado editado de volta no estado da sessão
-        st.session_state.pedido_ativo["itens"] = ed.rename(columns={"valor_unit": "valor_unit", "qtd": "qtd"}).to_dict("records")
+        # Salva o resultado editado de volta no estado da sessão (salva só o essencial para o DB)
+        st.session_state.pedido_ativo["itens"] = ed[["sku", "qtd", "valor_unit", "origem"]].rename(columns={"valor_unit": "valor_unit", "qtd": "qtd"}).to_dict("records")
 
         st.metric("Total Pedido", format_br_currency(tot))
         
@@ -457,7 +473,6 @@ with tab4:
                 st.success(f"OC {nid} gerada!"); st.session_state.pedido_ativo["itens"] = []; time.sleep(1); st.rerun()
         if st.button("🗑️ Limpar"): st.session_state.pedido_ativo["itens"] = []; st.rerun()
     else: st.info("Carrinho vazio.")
-
 # --- TAB 5: GESTÃO ---
 with tab5:
     st.header("🗂️ Gestão de OCs")
