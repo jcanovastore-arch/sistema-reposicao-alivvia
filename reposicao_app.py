@@ -385,18 +385,49 @@ with tab4:
     
     if ped["itens"]:
         df_i = pd.DataFrame(ped["itens"])
-        df_i["Total"] = df_i["qtd"] * df_i["valor_unit"]
-        ed = st.data_editor(df_i, num_rows="dynamic", use_container_width=True, key="ed_oc")
-        tot = ed["Total"].sum()
+        
+        # Garante tipos e recalcula o total
+        df_i["sku"] = df_i["sku"].apply(norm_sku)
+        df_i["valor_unit"] = pd.to_numeric(df_i["valor_unit"], errors='coerce').fillna(0)
+        df_i["qtd"] = pd.to_numeric(df_i["qtd"], errors='coerce').fillna(0).astype(int)
+        df_i["Total"] = (df_i["qtd"] * df_i["valor_unit"]).round(2)
+        
+        # Colunas a exibir na ordem e nome desejados
+        df_exibir = df_i[["sku", "qtd", "valor_unit", "Total", "origem"]].copy()
+
+        # Configuração das colunas com formatação de moeda e número
+        col_config = {
+            "sku": st.column_config.TextColumn("SKU", disabled=True),
+            "qtd": st.column_config.NumberColumn("Qtd", min_value=1, step=1, help="Quantidade a ser comprada", format="%d"),
+            "valor_unit": st.column_config.NumberColumn("Preço Unitário (R$)", format="R$ %.2f", help="Valor de custo/compra por unidade"),
+            "Total": st.column_config.NumberColumn("Total (R$)", format="R$ %.2f", disabled=True), # Não editável
+            "origem": st.column_config.TextColumn("Origem", disabled=True)
+        }
+        
+        ed = st.data_editor(
+            df_exibir, 
+            num_rows="dynamic", 
+            use_container_width=True, 
+            key="ed_oc",
+            column_config=col_config,
+            hide_index=True
+        )
+        
+        # Recalcula o total com os dados editados (garante que os valores numéricos voltem formatados)
+        tot = (ed["qtd"] * ed["valor_unit"]).sum()
+        
+        # Salva o resultado editado de volta no estado da sessão
+        st.session_state.pedido_ativo["itens"] = ed.rename(columns={"valor_unit": "valor_unit", "qtd": "qtd"}).to_dict("records")
+
         st.metric("Total Pedido", format_br_currency(tot))
+        
         if st.button("💾 Salvar OC", type="primary"):
             nid = gerar_numero_oc(ped["empresa"])
-            dados = {"id": nid, "empresa": ped["empresa"], "fornecedor": ped["fornecedor"], "data_emissao": dt.date.today().strftime("%Y-%m-%d"), "valor_total": float(tot), "status": "Pendente", "obs": ped["obs"], "itens": ed.to_dict("records")}
+            dados = {"id": nid, "empresa": ped["empresa"], "fornecedor": ped["fornecedor"], "data_emissao": dt.date.today().strftime("%Y-%m-%d"), "valor_total": float(tot), "status": "Pendente", "obs": ped["obs"], "itens": st.session_state.pedido_ativo["itens"]}
             if salvar_pedido(dados):
                 st.success(f"OC {nid} gerada!"); st.session_state.pedido_ativo["itens"] = []; time.sleep(1); st.rerun()
         if st.button("🗑️ Limpar"): st.session_state.pedido_ativo["itens"] = []; st.rerun()
     else: st.info("Carrinho vazio.")
-
 # --- TAB 5: GESTÃO ---
 with tab5:
     st.header("🗂️ Gestão de OCs")
