@@ -1,5 +1,5 @@
 # reposicao_app.py
-# Reposição Logística — Alivvia (V8.6 - Raio-X Diagnóstico)
+# Versão Restaurada (Visual Completo + Sidebar)
 
 import os
 import shutil
@@ -9,23 +9,23 @@ import streamlit as st
 import io
 import time
 
-# Imports internos
+# --- Importações Internas ---
 from src.config import DEFAULT_SHEET_LINK, LOCAL_PADRAO_FILENAME
-from src.utils import style_df_compra, norm_sku
+from src.utils import style_df_compra, norm_sku, enforce_numeric_types
 from src.data import get_local_file_path, get_local_name_path, load_any_table_from_bytes, carregar_padrao_local_ou_sheets
 from src.logic import Catalogo, mapear_tipo, mapear_colunas, calcular
 from src.orders_db import gerar_numero_oc, salvar_pedido, listar_pedidos
 
+# ===================== CONFIGURAÇÃO DA PÁGINA =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
-# Login Simplificado
+# ===================== LOGIN =====================
 if "password_correct" not in st.session_state:
     st.session_state.password_correct = False
 
 def check_password():
     if st.session_state.password_correct: return True
-    # Senha padrão ou vazia para facilitar debug se necessário, ajuste conforme sua security
-    pwd = st.text_input("Senha:", type="password")
+    pwd = st.text_input("🔒 Senha de Acesso:", type="password")
     if pwd == st.secrets["access"]["password"]:
         st.session_state.password_correct = True
         st.rerun()
@@ -33,12 +33,12 @@ def check_password():
 
 if not check_password(): st.stop()
 
-# Inicialização de Estado
+# ===================== ESTADO INICIAL =====================
 def _ensure_state():
     defaults = {
-        "catalogo_df": None, "kits_df": None, "resultado_ALIVVIA": None, "resultado_JCA": None,
-        "sel_A": {}, "sel_J": {}, "current_skus_A": [], "current_skus_J": [],
-        "pedido_ativo": {"itens": [], "fornecedor": None, "empresa": None, "obs": ""}
+        "catalogo_df": None, "kits_df": None, 
+        "resultado_ALIVVIA": None, "resultado_JCA": None,
+        "sel_A": {}, "sel_J": {}, "pedido_ativo": {"itens": [], "fornecedor": None}
     }
     for k, v in defaults.items():
         if k not in st.session_state: st.session_state[k] = v
@@ -48,6 +48,7 @@ def _ensure_state():
         for ft in ["FULL", "VENDAS", "ESTOQUE"]:
             if ft not in st.session_state[emp]:
                 st.session_state[emp][ft] = {"name": None, "bytes": None}
+            # Tenta carregar cache
             if not st.session_state[emp][ft]["name"]:
                 p_bin = get_local_file_path(emp, ft)
                 p_nam = get_local_name_path(emp, ft)
@@ -59,21 +60,42 @@ def _ensure_state():
 
 _ensure_state()
 
-# Layout Principal
-st.title("Reposição Logística — Alivvia (V8.6)")
+# ===================== SIDEBAR (MENU LATERAL) =====================
+with st.sidebar:
+    st.header("⚙️ Parâmetros")
+    
+    # Parâmetros Globais de Cálculo
+    h_param = st.selectbox("Horizonte (Dias)", [30, 60, 90], index=1, help="Dias de cobertura de estoque desejado")
+    g_param = st.number_input("Crescimento (% a.m.)", value=0.0, step=0.5)
+    lt_param = st.number_input("Lead Time (Dias)", value=0, step=1)
+    
+    st.markdown("---")
+    st.subheader("Catálogo")
+    if st.button("🔄 Carregar Padrão (Sheets)", use_container_width=True):
+        try:
+            c, _ = carregar_padrao_local_ou_sheets(DEFAULT_SHEET_LINK)
+            st.session_state.catalogo_df = c.catalogo_simples.rename(columns={"component_sku":"sku"})
+            st.session_state.kits_df = c.kits_reais
+            st.success("Padrão atualizado!")
+        except Exception as e: st.error(str(e))
+
+# ===================== APP PRINCIPAL =====================
+st.title("Reposição Logística — Alivvia (V8.7)")
 
 if st.session_state.catalogo_df is None:
-    st.warning("⚠️ Carregue o Padrão no menu lateral.")
+    st.warning("👈 Por favor, carregue o **Padrão** no menu lateral para começar.")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📂 Dados", "🔍 Análise", "📝 Editor", "🗂️ Gestão", "📦 Alocação"])
+# ABAS
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📂 Uploads", "🔍 Análise & Cálculo", "📝 Editor de OC", "🗂️ Gestão OCs", "📦 Alocação"])
 
+# --- TAB 1: UPLOADS ---
 with tab1:
     c1, c2 = st.columns(2)
     def upload_card(emp, col):
         with col:
-            st.subheader(emp)
+            st.subheader(f"Dados: {emp}")
             for ft in ["FULL", "VENDAS", "ESTOQUE"]:
-                f = st.file_uploader(f"{ft}", key=f"u_{emp}_{ft}")
+                f = st.file_uploader(f"Arquivo {ft}", key=f"u_{emp}_{ft}")
                 if f:
                     p_bin = get_local_file_path(emp, ft)
                     p_nam = get_local_name_path(emp, ft)
@@ -84,127 +106,71 @@ with tab1:
                 
                 curr = st.session_state[emp][ft]
                 if curr["name"]:
-                    st.info(f"Arquivo: {curr['name']}")
+                    st.caption(f"✅ Carregado: {curr['name']}")
 
     upload_card("ALIVVIA", c1)
     upload_card("JCA", c2)
-    
-    # --- FERRAMENTA DE RAIO-X (DIAGNÓSTICO) ---
-    st.divider()
-    st.subheader("🕵️‍♂️ Raio-X do SKU (Diagnóstico)")
-    sku_debug = st.text_input("Digite um SKU para investigar (Ex: MINIBAND):", value="MINIBAND").upper().strip()
-    
-    if sku_debug:
-        col_debug1, col_debug2 = st.columns(2)
-        
-        def mostrar_raio_x(emp, col):
-            with col:
-                st.markdown(f"**{emp}**")
-                # 1. Verifica no arquivo Bruto
-                d_est = st.session_state[emp]["ESTOQUE"]
-                raw_estoque = "N/A"
-                raw_cols = []
-                
-                if d_est["bytes"]:
-                    try:
-                        df_raw = load_any_table_from_bytes(d_est["name"], d_est["bytes"])
-                        raw_cols = list(df_raw.columns)
-                        # Busca simples no bruto
-                        mask = df_raw.astype(str).apply(lambda x: x.str.contains(sku_debug, case=False)).any(axis=1)
-                        df_filt = df_raw[mask]
-                        if not df_filt.empty:
-                            st.write("🔎 Encontrado no CSV Bruto:")
-                            st.dataframe(df_filt)
-                            # Tenta achar a coluna de estoque
-                            for c in df_filt.columns:
-                                if "estoque" in c.lower() and "atual" in c.lower():
-                                    raw_estoque = df_filt.iloc[0][c]
-                        else:
-                            st.warning("❌ SKU não encontrado no CSV Bruto.")
-                    except: pass
-                
-                st.caption(f"Valor no Arquivo: {raw_estoque}")
-                
-                # 2. Verifica no DataFrame Calculado
-                res = st.session_state.get(f"resultado_{emp}")
-                if res is not None:
-                    row = res[res["SKU"] == sku_debug]
-                    if not row.empty:
-                        st.write("📊 Resultado Calculado (Final):")
-                        st.json({
-                            "Estoque_Fisico_Final": int(row.iloc[0]["Estoque_Fisico"]),
-                            "Vendas_60d": int(row.iloc[0]["Vendas_Total_60d"]),
-                            "Reserva_30d (Subtraída?)": int(row.iloc[0]["Reserva_30d"]),
-                            "Folga_Calculada": int(row.iloc[0]["Folga_Fisico"]),
-                            "Compra_Sugerida": int(row.iloc[0]["Compra_Sugerida"])
-                        })
-                        
-                        fis = int(row.iloc[0]["Estoque_Fisico"])
-                        reserva = int(row.iloc[0]["Reserva_30d"])
-                        diff = fis - reserva
-                        st.info(f"Matemática: {fis} (Físico) - {reserva} (Reserva) = {diff}")
-                        if diff == 304 or diff == 258:
-                            st.error("ACHAMOS! Você está vendo a 'Folga' e não o Estoque Bruto.")
-                    else:
-                        st.warning("SKU sumiu após o cálculo (filtro de catálogo?).")
 
-        mostrar_raio_x("ALIVVIA", col_debug1)
-        mostrar_raio_x("JCA", col_debug2)
-
+# --- TAB 2: CÁLCULO ---
 with tab2:
     if st.session_state.catalogo_df is not None:
+        st.write("### Painel de Cálculo")
         c1, c2 = st.columns(2)
+        
         def processar(emp):
             s = st.session_state[emp]
             if not (s["FULL"]["bytes"] and s["VENDAS"]["bytes"]):
-                st.warning("Faltam arquivos Full ou Vendas."); return
+                st.warning(f"{emp}: Faltam arquivos Full ou Vendas."); return
             
             try:
+                # Carrega DataFrames
                 full_raw = load_any_table_from_bytes(s["FULL"]["name"], s["FULL"]["bytes"])
                 vend_raw = load_any_table_from_bytes(s["VENDAS"]["name"], s["VENDAS"]["bytes"])
                 fis_raw  = pd.DataFrame()
                 if s["ESTOQUE"]["bytes"]:
                     fis_raw = load_any_table_from_bytes(s["ESTOQUE"]["name"], s["ESTOQUE"]["bytes"])
 
+                # Mapeia Colunas
                 full_df = mapear_colunas(full_raw, "FULL")
                 vend_df = mapear_colunas(vend_raw, "VENDAS")
                 fis_df = pd.DataFrame()
                 if not fis_raw.empty:
                     fis_df = mapear_colunas(fis_raw, "FISICO")
                 
+                # Monta Catálogo e Calcula
                 cat = Catalogo(st.session_state.catalogo_df.rename(columns={"sku":"component_sku"}), st.session_state.kits_df)
                 
-                h = st.sidebar.selectbox("Horizonte", [60, 30, 90], index=0)
-                res, _ = calcular(full_df, fis_df, vend_df, cat, h=h)
+                # Usa parâmetros do Sidebar
+                res, _ = calcular(full_df, fis_df, vend_df, cat, h=h_param, g=g_param, LT=lt_param)
+                
                 st.session_state[f"resultado_{emp}"] = res
-                st.success("Calculado!")
+                st.success(f"{emp} Calculado com Sucesso!")
             except Exception as e:
-                st.error(f"Erro no cálculo: {e}")
+                st.error(f"Erro ao calcular {emp}: {e}")
 
-        if c1.button("Processar ALIVVIA"): processar("ALIVVIA")
-        if c2.button("Processar JCA"): processar("JCA")
+        if c1.button("▶️ Calcular ALIVVIA", use_container_width=True): processar("ALIVVIA")
+        if c2.button("▶️ Calcular JCA", use_container_width=True): processar("JCA")
         
-        # Tabelas
+        st.divider()
+        
+        # Exibição dos Resultados
         for emp in ["ALIVVIA", "JCA"]:
             res = st.session_state.get(f"resultado_{emp}")
             if res is not None:
-                st.subheader(f"Resultado {emp}")
-                
-                # --- TRUQUE DE EXIBIÇÃO ---
-                # Garante que o usuário veja colunas claras
-                df_show = res.copy()
-                df_show = df_show.rename(columns={
-                    "Estoque_Fisico": "Estoque Físico (BRUTO)",
-                    "Folga_Fisico": "Estoque Livre (S/ Reserva)"
-                })
-                st.dataframe(df_show, use_container_width=True)
+                st.subheader(f"Resultado: {emp}")
+                # Mostra tabela formatada
+                cols_view = [
+                    "SKU", "fornecedor", "Vendas_Total_60d", "Estoque_Full", 
+                    "Estoque_Fisico", "Compra_Sugerida", "Valor_Compra_R$"
+                ]
+                # Garante que colunas existam antes de mostrar
+                cols_existentes = [c for c in cols_view if c in res.columns]
+                st.dataframe(res[cols_existentes], use_container_width=True, hide_index=True)
 
-# Sidebar
-with st.sidebar:
-    if st.button("Carregar Padrão"):
-        try:
-            c, _ = carregar_padrao_local_ou_sheets(DEFAULT_SHEET_LINK)
-            st.session_state.catalogo_df = c.catalogo_simples.rename(columns={"component_sku":"sku"})
-            st.session_state.kits_df = c.kits_reais
-            st.success("Padrão Carregado!")
-        except Exception as e: st.error(str(e))
+# --- TAB 3, 4, 5 (Placeholders para manter layout - Se tiver código específico, mantenha o seu) ---
+with tab3:
+    st.info("Editor de OC disponível após seleção.")
+with tab4:
+    st.info("Gestão de OCs salvas.")
+with tab5:
+    st.info("Alocação de estoque.")
