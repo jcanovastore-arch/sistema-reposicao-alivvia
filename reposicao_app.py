@@ -199,8 +199,8 @@ with st.sidebar:
     if st.button("🔄 Baixar do Google Sheets"):
         try:
             c, origem = carregar_padrao_local_ou_sheets(DEFAULT_SHEET_LINK)
-            # CRÍTICO: Garantir a compatibilidade do nome da coluna sku (component_sku)
-            st.session_state.catalogo_df = c.catalogo_simples.rename(columns={"component_sku":"sku"})
+            # 🛑 CORREÇÃO CRÍTICA: Manter o nome 'component_sku' que logic.py espera.
+            st.session_state.catalogo_df = c.catalogo_simples
             st.session_state.kits_df = c.kits_reais
             st.success(f"Carregado via {origem}!")
         except Exception as e: 
@@ -212,8 +212,8 @@ with st.sidebar:
         try:
             from src.data import _carregar_padrao_de_content 
             c = _carregar_padrao_de_content(up_manual.getvalue())
-            # CRÍTICO: Garantir a compatibilidade do nome da coluna sku (component_sku)
-            st.session_state.catalogo_df = c.catalogo_simples.rename(columns={"component_sku":"sku"})
+            # 🛑 CORREÇÃO CRÍTICA: Manter o nome 'component_sku' que logic.py espera.
+            st.session_state.catalogo_df = c.catalogo_simples
             st.session_state.kits_df = c.kits_reais
             st.success("✅ Arquivo carregado manualmente!")
         except Exception as e:
@@ -222,7 +222,7 @@ with st.sidebar:
 st.title("Reposição Logística — Alivvia")
 if st.session_state.catalogo_df is None: st.warning("⚠️ Carregue o Padrão de Produtos no menu lateral.")
 
-# 🛑 LAYOUT DE 6 ABAS RESTAURADO E CORRIGIDO
+# 🛑 LAYOUT DE 6 ABAS RESTAURADO
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📂 Uploads", "🔍 Análise & Compra", "🚛 Cruzar PDF Full", "📝 Editor OC", "🗂️ Gestão", "📦 Alocação"])
 
 # --- TAB 1: UPLOADS ---
@@ -263,7 +263,7 @@ with tab2:
                 fis = pd.DataFrame()
                 if s["ESTOQUE"]["bytes"]:
                     fis = mapear_colunas(load_any_table_from_bytes(s["ESTOQUE"]["name"], s["ESTOQUE"]["bytes"]), "FISICO")
-                # CRÍTICO: Garantir que a coluna 'sku' está no catalogo simples para passar para a lógica
+                # CRÍTICO: Passamos o df do catálogo com a coluna 'component_sku' correta
                 cat = Catalogo(st.session_state.catalogo_df, st.session_state.kits_df)
                 res, _ = calcular(full, fis, vend, cat, h_p, g_p, lt_p)
                 st.session_state[f"resultado_{emp}"] = res
@@ -338,7 +338,7 @@ with tab2:
                 if st.button(f"🛒 Enviar Selecionados ({emp}) para Editor", key=f"bt_{emp}"): 
                     add_to_cart(emp)
 
-# --- TAB 3: CRUZAR PDF FULL (RESTAURADO E CORRIGIDO COM EXPLOSÃO) ---
+# --- TAB 3: CRUZAR PDF FULL (CORRIGIDO COM EXPLOSÃO) ---
 with tab3:
     st.header("🚛 Cruzar PDF Full")
     st.info("⚠️ Para análise correta, calcule a aba 'Análise & Compra' primeiro. O Catálogo de Kits e Preços será usado na explosão.")
@@ -361,6 +361,7 @@ with tab3:
             if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
                  st.error("Padrão de produtos não carregado. Não consigo explodir kits. Por favor, carregue na barra lateral.")
             else:
+                # O catálogo já está armazenado com o nome de coluna CORRETO (component_sku)
                 cat_obj = Catalogo(st.session_state.catalogo_df, st.session_state.kits_df)
                 kits_validos = construir_kits_efetivo(cat_obj)
                 
@@ -370,7 +371,6 @@ with tab3:
                 df_exploded = df_exploded.rename(columns={"Quantidade": "Qtd_Necessaria_Envio"})
                 
                 # 3. Cruzamento com Estoque Físico (df_res vem da Tab 2, com Preco e Estoque_Fisico)
-                # CRÍTICO: Mesclamos com o resultado da análise para obter o preço, fornecedor e estoque físico.
                 cols_to_merge = ["SKU", "Estoque_Fisico", "fornecedor", "Preco"]
                 df_merged = df_exploded.merge(df_res[cols_to_merge], on="SKU", how="left")
                 
@@ -450,7 +450,7 @@ with tab3:
                     st.balloons()
                     st.success("✅ Você tem estoque físico suficiente para este envio!")
 
-# --- TAB 4: EDITOR OC (ANTIGA TAB 3 - CORRIGIDA PARA ADIÇÃO MANUAL) ---
+# --- TAB 4: EDITOR OC (CORRIGIDA PARA ADIÇÃO MANUAL) ---
 with tab4:
     st.header("📝 Editor de Ordem de Compra")
     st.info("⚠️ Para adicionar um item manualmente, digite o SKU, Qtd e Preço Unitário na última linha da tabela.")
@@ -485,6 +485,8 @@ with tab4:
          if 'nome_produto' in df_cat.columns: rename_map['nome_produto'] = 'Nome do Produto'
          if 'fornecedor' in df_cat.columns: rename_map['fornecedor'] = 'Forn. Info'
          
+         # CRÍTICO: O catálogo está com 'component_sku', renomeamos para 'sku' apenas para o merge aqui
+         df_cat = df_cat.rename(columns={'component_sku': 'sku'})
          df_cat = df_cat.rename(columns=rename_map)
 
          # Colunas a serem usadas no merge: verificamos quais colunas de contexto estão presentes
@@ -537,7 +539,7 @@ with tab4:
             st.success(f"OC {nid} gerada!"); st.session_state.pedido_ativo["itens"] = []; time.sleep(1); st.rerun()
     if c_btn2.button("🗑️ Limpar"): st.session_state.pedido_ativo["itens"] = []; st.rerun()
 
-# --- TAB 5: GESTÃO (ANTIGA TAB 4 - CORRIGIDA PARA IMPRESSÃO E CONTEXTO) ---
+# --- TAB 5: GESTÃO (CORRIGIDA PARA IMPRESSÃO E CONTEXTO) ---
 with tab5:
     st.header("🗂️ Gestão de Ordens de Compra")
     
@@ -583,6 +585,9 @@ with tab5:
                         rename_map = {}
                         if 'nome_produto' in df_cat.columns: rename_map['nome_produto'] = 'Nome do Produto'
                         if 'fornecedor' in df_cat.columns: rename_map['fornecedor'] = 'Forn. Info'
+                        
+                        # CRÍTICO: O catálogo está com 'component_sku', renomeamos para 'sku' apenas para o merge aqui
+                        df_cat = df_cat.rename(columns={'component_sku': 'sku'})
                         df_cat = df_cat.rename(columns=rename_map)
                         
                         cols_to_merge = ["sku"]
