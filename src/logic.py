@@ -122,6 +122,9 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     full["Estoque_Full"]   = full["Estoque_Full"].astype(int)
     full["Em_Transito"]    = full["Em_Transito"].astype(int) 
 
+    # --- CORREÇÃO CRÍTICA DO KEYERROR: Garantindo que a coluna de backup exista no FULL ---
+    full["Estoque_Full_Original"] = full["Estoque_Full"].copy()
+    
     shp = vendas_df.copy()
     shp["SKU"] = shp["SKU"].map(norm_sku)
     shp["Quantidade_60d"] = shp["Quantidade"].astype(int)
@@ -149,23 +152,15 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     base["Estoque_Fisico"] = base["Estoque_Fisico"].fillna(0).astype(int)
     base["Preco"] = base["Preco"].fillna(0.0)
     
-    # --- CORREÇÃO DE INICIALIZAÇÃO DE ESTOQUE FULL ORIGINAL (Fix Key Error) ---
-    
-    # Cria a coluna Estoque_Full e Em_Transito se não existirem (robustez extra)
-    if "Estoque_Full" not in full.columns:
-        full["Estoque_Full"] = 0
-    if "Em_Transito" not in full.columns:
-        full["Em_Transito"] = 0
-        
-    full_simple = full[["SKU", "Estoque_Full", "Em_Transito"]].copy()
+    # Puxa o Estoque Full Original e Em_Transito para o DataFrame base
+    full_simple = full[["SKU", "Estoque_Full", "Em_Transito", "Estoque_Full_Original"]].copy()
     base = base.merge(full_simple, on="SKU", how="left", suffixes=('_base', '_full'))
     
-    # Armazena o valor original para a explosão
-    base["Estoque_Full_Original"] = base["Estoque_Full"].fillna(0).astype(int) 
+    # Puxa os valores para base, garantindo que o Estoque_Full original não é perdido
+    base["Estoque_Full_Original"] = base["Estoque_Full_Original"].fillna(0).astype(int) 
+    base["Estoque_Full"] = base["Estoque_Full"].fillna(0).astype(int) 
     base["Em_Transito"] = base["Em_Transito"].fillna(0).astype(int) 
     base = base.drop(columns=[col for col in base.columns if col.endswith('_full') or col.endswith('_base')], errors='ignore')
-    
-    # --- FIM DA CORREÇÃO ---
 
 
     fator = (1.0 + g/100.0) ** (h/30.0)
