@@ -406,6 +406,7 @@ with tab3:
 # --- TAB 4: EDITOR ---
 with tab4:
     st.header("📝 Editor de Ordem de Compra")
+    st.info("⚠️ Para adicionar um item manualmente, digite o SKU, Qtd e Preço Unitário na última linha da tabela.")
     ped = st.session_state.pedido_ativo
     c1, c2, c3 = st.columns(3)
     ped["fornecedor"] = c1.text_input("Fornecedor", ped["fornecedor"])
@@ -421,7 +422,7 @@ with tab4:
         df_i["qtd"] = pd.to_numeric(df_i["qtd"], errors='coerce').fillna(0).astype(int)
         df_i["Total"] = (df_i["qtd"] * df_i["valor_unit"]).round(2)
         
-        # TENTA JUNTAR O NOME DO PRODUTO E FORNECEDOR (CONTEXTO CRUCIAL)
+        # LÓGICA DE JOIN CRUCIAL: Traz Nome do Produto e Fornecedor
         if st.session_state.catalogo_df is not None:
              df_cat = st.session_state.catalogo_df.copy()
              
@@ -440,18 +441,18 @@ with tab4:
 
         # Configuração das colunas com formatação de moeda e número
         col_config = {
-            "sku": st.column_config.TextColumn("SKU", disabled=True),
-            "Nome do Produto": st.column_config.TextColumn("Produto", disabled=True), # Não editável
-            "Forn. Info": st.column_config.TextColumn("Forn. Info", disabled=True), # Não editável
+            "sku": st.column_config.TextColumn("SKU", disabled=False), # EDITÁVEL para adicionar manualmente
+            "Nome do Produto": st.column_config.TextColumn("Produto", disabled=True), 
+            "Forn. Info": st.column_config.TextColumn("Forn. Info", disabled=True), 
             "qtd": st.column_config.NumberColumn("Qtd", min_value=1, step=1, help="Quantidade a ser comprada", format="%d"),
             "valor_unit": st.column_config.NumberColumn("Preço Unitário (R$)", format="R$ %.2f", help="Valor de custo/compra por unidade"),
-            "Total": st.column_config.NumberColumn("Total (R$)", format="R$ %.2f", disabled=True), # Não editável
+            "Total": st.column_config.NumberColumn("Total (R$)", format="R$ %.2f", disabled=True), 
             "origem": st.column_config.TextColumn("Origem", disabled=True)
         }
         
         ed = st.data_editor(
             df_exibir, 
-            num_rows="dynamic", 
+            num_rows="dynamic", # Permite adicionar linhas
             use_container_width=True, 
             key="ed_oc",
             column_config=col_config,
@@ -472,21 +473,66 @@ with tab4:
             if salvar_pedido(dados):
                 st.success(f"OC {nid} gerada!"); st.session_state.pedido_ativo["itens"] = []; time.sleep(1); st.rerun()
         if st.button("🗑️ Limpar"): st.session_state.pedido_ativo["itens"] = []; st.rerun()
-    else: st.info("Carrinho vazio.")
-# --- TAB 5: GESTÃO ---
+    else: st.info("Carrinho vazio.")# --- TAB 5: GESTÃO ---
 with tab5:
-    st.header("🗂️ Gestão de OCs")
-    if st.button("🔄 Atualizar"): st.rerun()
+    st.header("🗂️ Gestão de Ordens de Compra")
+    
+    col_print, col_update = st.columns([1, 4])
+    
+    # BOTÃO DE IMPRIMIR/PDF
+    col_print.button("🖨️ Imprimir OC", help="Clique aqui para gerar o PDF da Ordem de Compra. Use o destino 'Salvar como PDF' na tela de impressão.")
+    
+    if col_update.button("🔄 Atualizar Lista"): st.rerun()
+    
     df_ocs = listar_pedidos()
     if not df_ocs.empty:
-        st.dataframe(df_ocs[["ID", "Data", "Empresa", "Fornecedor", "Valor", "Status"]], use_container_width=True, hide_index=True)
-        sel_oc = st.selectbox("ID", df_ocs["ID"].unique())
+        # Tabela principal de OCs
+        st.dataframe(df_ocs[["ID", "Data", "Empresa", "Fornecedor", "Valor", "Status", "Obs"]], use_container_width=True, hide_index=True)
+        
+        st.markdown("---")
+        
+        c_a1, c_a2, c_a3 = st.columns([2, 1, 1])
+        sel_oc = c_a1.selectbox("Selecione a OC para Gerenciamento:", df_ocs["ID"].unique(), key="sel_oc_gestao")
+        
         if sel_oc:
             row = df_ocs[df_ocs["ID"] == sel_oc].iloc[0]
-            ns = st.selectbox("Status", ["Pendente", "Aprovado", "Enviado", "Recebido", "Cancelado"])
-            if st.button("Atualizar Status"): atualizar_status(sel_oc, ns); st.rerun()
-            if st.button("Excluir"): excluir_pedido_db(sel_oc); st.rerun()
-
+            
+            # Atualização de Status
+            ns = c_a2.selectbox("Novo Status", ["Pendente", "Aprovado", "Enviado", "Recebido", "Cancelado"], key="new_status_oc")
+            if c_a2.button("✔️ Atualizar Status"): atualizar_status(sel_oc, ns); st.success("Status atualizado!"); time.sleep(1); st.rerun()
+            
+            # Detalhes e Exclusão
+            with st.expander(f"Detalhes da OC {sel_oc}"):
+                st.markdown(f"**Fornecedor:** {row['Fornecedor']} | **Empresa:** {row['Empresa']} | **Valor Total:** {format_br_currency(row['Valor'])}")
+                st.markdown(f"**Observações:** {row['Obs']}")
+                
+                itens = row.get("Dados_Completos") # Puxa os dados completos
+                if isinstance(itens, list) and len(itens) > 0: 
+                    df_itens = pd.DataFrame(itens)
+                    
+                    # Adiciona Nome do Produto e Fornecedor Info para contexto
+                    if st.session_state.catalogo_df is not None:
+                        df_cat = st.session_state.catalogo_df.copy()
+                        df_cat = df_cat.rename(columns={"sku": "sku", "nome_produto": "Nome do Produto", "fornecedor": "Forn. Info"})
+                        df_itens = df_itens.merge(df_cat[["sku", "Nome do Produto", "Forn. Info"]], on="sku", how="left")
+                    
+                    df_itens["Total"] = df_itens["qtd"].astype(float) * df_itens["valor_unit"].astype(float)
+                    
+                    cols_exp = [c for c in ["sku", "Nome do Produto", "Forn. Info", "qtd", "valor_unit", "Total", "origem"] if c in df_itens.columns]
+                    
+                    st.dataframe(
+                        df_itens[cols_exp], 
+                        use_container_width=True, 
+                        hide_index=True,
+                        column_config={
+                            "valor_unit": st.column_config.NumberColumn("Preço Unitário", format="R$ %.2f"),
+                            "Total": st.column_config.NumberColumn("Total", format="R$ %.2f"),
+                        }
+                    )
+                else: 
+                    st.write("Sem detalhes dos itens.")
+            
+            if c_a3.button("🗑️ Excluir", help="Excluir Ordem de Compra.", key="delete_oc_btn"): excluir_pedido_db(sel_oc); st.warning("Excluído"); time.sleep(1); st.rerun()
 # --- TAB 6: ALOCAÇÃO ---
 with tab6:
     st.header("📦 Alocação de Compra")
