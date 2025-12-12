@@ -32,8 +32,7 @@ def get_br_datetime() -> dt.datetime:
 # 🛑 FUNÇÃO: MAPEAMENTO POR APROXIMAÇÃO (FUZZY SIMPLIFICADO)
 def find_closest_sku(broken_sku: str, catalog_skus: set) -> Optional[str]:
     """
-    Tenta encontrar a melhor correspondência do SKU quebrado no catálogo,
-    usando a correspondência por prefixo (startswith).
+    Tenta encontrar a melhor correspondência do SKU quebrado no catálogo.
     """
     broken_sku = norm_sku(broken_sku).replace(' ', '').replace('\n', '')
     if not broken_sku: return None
@@ -60,71 +59,78 @@ def map_broken_skus(df_pdf: pd.DataFrame, catalogo_df: pd.DataFrame) -> pd.DataF
     
     return df_mapped.groupby("SKU", as_index=False)["Qtd_Envio"].sum() 
 
-# ===================== FUNÇÃO DE LEITURA PDF (FINAL E ROBUSTA) =====================
+# ===================== FUNÇÃO DE LEITURA PDF (V35 - VACINA 404 + JANELA LONGA) =====================
 def extrair_dados_pdf_ml(pdf_bytes):
     """
-    Lê o PDF de envio do ML usando extração de tabela (apenas pareamento perfeito) 
-    e um forte fallback de REGEX para texto puro.
+    Lê o PDF de envio do ML com sanitização prévia do número '404' e janela de busca ampliada.
     """
     data = []
-    # Permite letras, números, hífens, barras E espaços (\s)
-    regex_sku_table = re.compile(r'SKU:?\s*([\w\-\/\s]+)', re.IGNORECASE)
-    regex_qtd = re.compile(r'\b(\d{1,4})\b') 
+    # Regex para SKU: Permite letras, números, hífens, barras E espaços (\s)
+    regex_sku_finder = re.compile(r'SKU:?\s*([\w\-\/\s]+)', re.IGNORECASE)
+    regex_qtd_finder = re.compile(r'\b(\d{1,4})\b') 
 
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for page in pdf.pages:
                 
-                # PRIMEIRA TENTATIVA: Extração por Tabela
+                # --- ESTRATÉGIA 1: TABELA (Mais confiável se existir) ---
                 tabela = page.extract_table()
                 if tabela:
                     for row in tabela:
                         if not row or len(row) < 2: continue
                         
-                        col_produto = str(row[0]).strip() if row[0] is not None else ""
-                        col_qtd = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
+                        col_produto = str(row[0]) if row[0] else ""
+                        col_qtd = str(row[1]) if len(row) > 1 and row[1] else ""
                         
-                        # Limpa quebras de linha e múltiplos espaços para remontar a string na célula
+                        # 🛑 VACINA 404 NA TABELA: Remove o número 404 da coluna de produto/descrição
+                        col_produto = col_produto.replace("404", " ") 
+                        
+                        # Limpeza básica
                         col_produto_clean = re.sub(r'[\n\r]+', ' ', col_produto).strip()
                         col_qtd_clean = re.sub(r'[\n\r]+', ' ', col_qtd).strip()
                         
-                        skus_encontrados = regex_sku_table.findall(col_produto_clean)
-                        qtds_encontradas = regex_qtd.findall(col_qtd_clean)
+                        # Busca SKU na coluna 0 e QTD na coluna 1
+                        match_sku = regex_sku_finder.search(col_produto_clean)
+                        match_qtd = regex_qtd_finder.search(col_qtd_clean)
                         
-                        # 🛑 CRÍTICO: SÓ PROCESSA SE TIVER PAREAMENTO PERFEITO (SKUS == QTDs)
-                        # E a QTD deve vir da coluna de QTD, não da coluna de Produto.
-                        if skus_encontrados and len(skus_encontrados) == len(qtds_encontradas) and col_qtd_clean:
-                            for sku, qty_str in zip(skus_encontrados, qtds_encontradas):
-                                final_sku_raw = sku.strip()
-                                try:
-                                    qty = int(qty_str)
-                                    if qty > 0:
-                                        data.append({"SKU": final_sku_raw, "Qtd_Envio": qty})
-                                except ValueError:
-                                    pass
-                
-                # 🛑 SEGUNDA TENTATIVA/FALLBACK: Extração por REGEX no texto puro da página (garantia total)
+                        if match_sku and match_qtd:
+                            sku = match_sku.group(1).strip()
+                            try:
+                                qty = int(match_qtd.group(1))
+                                if qty > 0:
+                                    data.append({"SKU": sku, "Qtd_Envio": qty})
+                                    continue # Sucesso na tabela, vai para próxima linha
+                            except: pass
+
+                # --- ESTRATÉGIA 2: FALLBACK TEXTO (Para Regatas, Kits e itens complexos) ---
                 text = page.extract_text()
                 if text:
-                    # Regex para capturar SKU e forçar que a QTD esteja PRÓXIMA no fluxo de texto,
-                    # usando um limite de 50 caracteres (para pular a descrição do produto)
-                    regex_fallback = re.compile(r'SKU:?\s*([\w\-\/]+).{0,50}?(\b\d{1,4}\b)', re.IGNORECASE | re.DOTALL)
+                    # 🛑 VACINA 404 NO TEXTO BRUTO: 
+                    # Substitui '404' por 'XXX' para que a regex de número nunca o pegue como quantidade
+                    # Isso resolve o problema da Cinta Esbelt 404 de vez.
+                    text_sanitized = text.replace("404", "XXX")
                     
-                    matches = regex_fallback.findall(text)
+                    # Regex ajustada:
+                    # 1. Procura 'SKU:' seguido do código.
+                    # 2. Permite até 250 caracteres de "lixo" (descrição longa) - AUMENTADO DE 50 PARA 250
+                    # 3. Captura o próximo número isolado (\b\d+\b)
+                    regex_fallback = re.compile(r'SKU:?\s*([\w\-\/]+).{0,250}?(\b\d{1,4}\b)', re.IGNORECASE | re.DOTALL)
+                    
+                    matches = regex_fallback.findall(text_sanitized)
                     for sku_raw, qty_str in matches:
-                        # 🛑 NOVA VALIDAÇÃO: Evita que o número "404" da descrição da CINTA seja lido como quantidade
-                        if "404" in sku_raw and qty_str == "404": continue
-                            
                         try:
                             qty = int(qty_str)
-                            if qty > 0 and qty < 20000:
-                                # Adiciona o SKU bruto, o fuzzy match resolverá se estiver incompleto
+                            # Filtro extra de segurança: quantidades muito grandes geralmente são erros (ex: CEPs)
+                            if qty > 0 and qty < 10000: 
                                 data.append({"SKU": sku_raw.strip(), "Qtd_Envio": qty})
                         except ValueError:
                             pass
                                 
-            # Final: Agrupa somando quantidades (essencial para eliminar duplicação e somar kits)
+            # Final: Agrupa somando quantidades e remove duplicatas
+            if not data: return pd.DataFrame()
+            
             df_final = pd.DataFrame(data).drop_duplicates()
+            # Agrupa por SKU para somar casos onde o mesmo item aparece mais de uma vez (raro, mas possível)
             return df_final.groupby("SKU", as_index=False)["Qtd_Envio"].sum()
 
     except Exception as e:
