@@ -22,11 +22,20 @@ from src.orders_db import gerar_numero_oc, salvar_pedido, listar_pedidos, atuali
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
 # ===================== FUNÇÕES DE CAMINHO DE CACHE =====================
+# É CRÍTICO que esta função exista para gerenciar o timestamp
 def get_local_timestamp_path(empresa: str, tipo: str) -> str:
     """Retorna o caminho local para o arquivo de timestamp."""
     # Assume que STORAGE_DIR está definido em src.config
     return os.path.join(STORAGE_DIR, f"{empresa}_{tipo}_time.txt")
 
+# 🛑 NOVA FUNÇÃO: Obtém a hora atual no fuso horário do Brasil (-03:00)
+def get_br_datetime() -> dt.datetime:
+    """Retorna o datetime atual ajustado para o fuso horário de Brasília (UTC-3)."""
+    # Cria a hora atual no fuso horário do servidor (Naive)
+    now_naive = dt.datetime.now()
+    # Aplica o offset de -3 horas (UTC-3, horário padrão de Brasília)
+    now_br = now_naive - dt.timedelta(hours=3)
+    return now_br
 
 # ===================== FUNÇÃO DE LEITURA PDF =====================
 def extrair_dados_pdf_ml(pdf_bytes):
@@ -98,7 +107,7 @@ def _ensure_state():
     for emp in ["ALIVVIA", "JCA"]:
         if emp not in st.session_state: st.session_state[emp] = {}
         for ft in ["FULL", "VENDAS", "ESTOQUE"]:
-            # CRÍTICO: Atualiza o default para incluir 'timestamp'
+            # Atualiza o default para incluir 'timestamp'
             if ft not in st.session_state[emp] or "timestamp" not in st.session_state[emp][ft]: 
                 st.session_state[emp][ft] = {"name": None, "bytes": None, "timestamp": None}
             
@@ -207,14 +216,14 @@ def clear_file_cache(empresa, tipo):
     st.session_state[f"resultado_{empresa}"] = None # Limpa o cálculo da Tab 2
     
     if deleted:
-        st.toast(f"Cache de {empresa} {tipo} limpo!", icon="🧹")
-        time.sleep(1)
+        st.toast(f"Cache de {empresa} {tipo} limpo! Recarregando...", icon="🧹")
+        time.sleep(1) # Pequena pausa para garantir a mensagem
         st.rerun()
 
 def reset_master_data():
     st.session_state.catalogo_df = None
     st.session_state.kits_df = None
-    st.toast("Dados Mestre (Catálogo e Kits) limpos! Recarregue-os.", icon="🧹")
+    st.toast("Dados Mestre (Catálogo e Kits) limpos! Recarregando...", icon="🧹")
     st.rerun() 
 
 # ===================== SIDEBAR =====================
@@ -260,7 +269,7 @@ if st.session_state.catalogo_df is None: st.warning("⚠️ Carregue o Padrão d
 # 🛑 LAYOUT DE 6 ABAS RESTAURADO
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📂 Uploads", "🔍 Análise & Compra", "🚛 Cruzar PDF Full", "📝 Editor OC", "🗂️ Gestão", "📦 Alocação"])
 
-# --- TAB 1: UPLOADS (CORRIGIDO PARA UNICIDADE E TIMESTAMP) ---
+# --- TAB 1: UPLOADS (CORRIGIDO PARA UNICIDADE, TIMESTAMP E ESTABILIDADE) ---
 with tab1:
     st.subheader("⚠️ Arquivos Operacionais (Vendas, Estoque, Full)")
     st.info("Apenas o último arquivo carregado para cada tipo é mantido no cache local para garantir a unicidade dos dados.")
@@ -276,37 +285,45 @@ with tab1:
                 file_types = ["xlsx", "csv"]
                 if ft == "FULL": file_types.append("pdf")
                     
+                # O key do file_uploader é CRÍTICO para o controle de estado.
                 f = st.file_uploader(f"Upload {ft}", type=file_types, key=f"u_{emp}_{ft}")
                 
-                # Variáveis de Estado de Upload
-                uploaded_flag_key = f"uploaded_{emp}_{ft}"
                 
-                # 🛑 CORREÇÃO CRÍTICA DO LOOP INFINITO
-                if f and f.name != curr_state.get("name") and f.getvalue() != curr_state.get("bytes"):
-                    # Lógica de Sobrescrita e Timestamp
-                    time_path = get_local_timestamp_path(emp, ft)
+                # 🛑 LÓGICA DE DETECÇÃO DE NOVO ARQUIVO E SALVAMENTO 🛑
+                # Streamlit detecta que 'f' mudou.
+                if f:
+                    # Verifica se é um arquivo novo (comparando nome e tamanho/bytes para estabilidade)
+                    is_new_file = (f.name != curr_state.get("name")) or (f.getvalue() != curr_state.get("bytes"))
                     
-                    # Usa a variável 'f' para obter o nome e conteúdo AGORA
-                    file_bytes = f.getvalue()
-                    file_name = f.name
-                    # CRÍTICO: Usamos UTC para evitar problemas de fuso e exibimos em formato local
-                    timestamp_str = dt.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                    if is_new_file:
+                        # Lógica de Sobrescrita e Timestamp
+                        time_path = get_local_timestamp_path(emp, ft)
+                        
+                        file_bytes = f.getvalue()
+                        file_name = f.name
+                        
+                        # 🛑 CRÍTICO: Obtém a hora no fuso BRASIL
+                        now_br = get_br_datetime()
+                        timestamp_str = now_br.strftime("%d/%m/%Y %H:%M:%S")
 
-                    # 1. Salva o conteúdo do arquivo (sobrescreve o .bin)
-                    with open(get_local_file_path(emp, ft), 'wb') as fb: fb.write(file_bytes)
-                    # 2. Salva o nome do arquivo (sobrescreve o .txt)
-                    with open(get_local_name_path(emp, ft), 'w') as fn: fn.write(file_name)
-                    # 3. Salva o timestamp (sobrescreve o _time.txt)
-                    with open(time_path, 'w') as ft_w: ft_w.write(timestamp_str)
-                    
-                    # 4. Atualiza a sessão para o novo arquivo
-                    st.session_state[emp][ft] = {"name": file_name, "bytes": file_bytes, "timestamp": timestamp_str}
-                    st.toast("✅ Arquivo Salvo e Sobrescrito!")
-                    
-                    # Força um re-render limpo
-                    st.rerun()
+                        # 1. Salva o conteúdo do arquivo (sobrescreve o .bin)
+                        with open(get_local_file_path(emp, ft), 'wb') as fb: fb.write(file_bytes)
+                        # 2. Salva o nome do arquivo (sobrescreve o .txt)
+                        with open(get_local_name_path(emp, ft), 'w') as fn: fn.write(file_name)
+                        # 3. Salva o timestamp (sobrescreve o _time.txt)
+                        with open(time_path, 'w') as ft_w: ft_w.write(timestamp_str)
+                        
+                        # 4. Atualiza a sessão para o novo arquivo
+                        st.session_state[emp][ft] = {"name": file_name, "bytes": file_bytes, "timestamp": timestamp_str}
+                        
+                        # AVISO e RE-RUN: usamos toast e rerun para forçar a renderização limpa do novo estado
+                        st.toast("✅ Arquivo Salvo e Sobrescrito! Recarregando...", icon="✅")
+                        time.sleep(1) 
+                        st.rerun() 
+                    # else:
+                        # Se o arquivo não for novo, apenas carregue ele do st.session_state (já está lá).
 
-                # A lógica de exibição está correta
+                # A lógica de exibição está correta (agora que o flow control foi corrigido)
                 if curr_state["name"]:
                     st.caption(f"**Nome:** {curr_state['name']}")
                     # CRÍTICO: Exibir o timestamp do estado
