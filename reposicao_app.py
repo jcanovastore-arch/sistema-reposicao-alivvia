@@ -42,8 +42,8 @@ def extrair_dados_pdf_ml(pdf_bytes):
     e garantir que a quantidade seja corretamente associada, mesmo em formatação ruim.
     """
     data = []
-    # Regex para buscar SKUs (letras, números, hífens, barras)
-    regex_sku = re.compile(r'SKU:?\s*([\w\-\/]+)', re.IGNORECASE)
+    # 🛑 CORREÇÃO CRÍTICA: Adicionar \s (espaço) para capturar SKUs que estão quebrados por quebra de linha
+    regex_sku = re.compile(r'SKU:?\s*([\w\-\/\s]+)', re.IGNORECASE)
     # Regex para buscar a quantidade (números inteiros de 1 a 4 dígitos)
     regex_qtd = re.compile(r'\b(\d{1,4})\b') 
 
@@ -58,7 +58,7 @@ def extrair_dados_pdf_ml(pdf_bytes):
                         col_produto = str(row[0]).strip() if row[0] is not None else ""
                         col_qtd = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
                         
-                        # 🛑 CORREÇÃO CRÍTICA: Limpa todas as quebras de linha/espaços múltiplos para remontar SKUs longos
+                        # Limpa todas as quebras de linha/espaços múltiplos para remontar SKUs longos
                         col_produto_clean = re.sub(r'[\n\r]+', ' ', col_produto).strip()
                         col_qtd_clean = re.sub(r'[\n\r]+', ' ', col_qtd).strip()
                         
@@ -69,10 +69,12 @@ def extrair_dados_pdf_ml(pdf_bytes):
                         # 2. Tenta parear (ideal: número de SKUs coincide com QTDs)
                         if skus_encontrados and len(skus_encontrados) == len(qtds_encontradas):
                             for sku, qty_str in zip(skus_encontrados, qtds_encontradas):
+                                # 🛑 IMPORTANTE: Remove o espaço extra que a regex tolerou antes de normalizar
+                                final_sku = norm_sku(sku.replace(' ', ''))
                                 try:
                                     qty = int(qty_str)
                                     if qty > 0:
-                                        data.append({"SKU": norm_sku(sku), "Qtd_Envio": qty})
+                                        data.append({"SKU": final_sku, "Qtd_Envio": qty})
                                 except ValueError:
                                     pass
                         
@@ -81,6 +83,7 @@ def extrair_dados_pdf_ml(pdf_bytes):
                             match_sku = regex_sku.search(col_produto_clean)
                             if match_sku:
                                 sku = match_sku.group(1)
+                                final_sku = norm_sku(sku.replace(' ', ''))
                                 
                                 # Procura a QTD na coluna de QTD ou na própria célula de produto
                                 source_text = col_qtd_clean if col_qtd_clean else col_produto_clean
@@ -91,7 +94,7 @@ def extrair_dados_pdf_ml(pdf_bytes):
                                     try:
                                         qty = int(match_qty.group(1))
                                         if qty > 0:
-                                            data.append({"SKU": norm_sku(sku), "Qtd_Envio": qty})
+                                            data.append({"SKU": final_sku, "Qtd_Envio": qty})
                                     except ValueError:
                                         pass
                 
@@ -243,8 +246,6 @@ def clear_file_cache(empresa, tipo):
     # CRÍTICO: Resetar a sessão para forçar o recálculo
     st.session_state[empresa][tipo] = {"name": None, "bytes": None, "timestamp": None}
     st.session_state[f"resultado_{empresa}"] = None # Limpa o cálculo da Tab 2
-
-    # 🛑 REMOVIDO HACK QUE CAUSAVA O CRASH: st.session_state[f"u_{empresa}_{tipo}"] = None
 
     if deleted:
         st.toast(f"Cache de {empresa} {tipo} limpo! Recarregando...", icon="🧹")
