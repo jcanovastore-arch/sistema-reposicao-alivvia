@@ -21,30 +21,61 @@ from src.orders_db import gerar_numero_oc, salvar_pedido, listar_pedidos, atuali
 
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
-# ===================== FUNÇÕES DE CAMINHO DE CACHE =====================
+# ===================== FUNÇÕES DE CACHE E UTILS =====================
 def get_local_timestamp_path(empresa: str, tipo: str) -> str:
     """Retorna o caminho local para o arquivo de timestamp."""
     return os.path.join(STORAGE_DIR, f"{empresa}_{tipo}_time.txt")
 
-# 🛑 Obtém a hora atual no fuso horário do Brasil (-03:00)
 def get_br_datetime() -> dt.datetime:
     """Retorna o datetime atual ajustado para o fuso horário de Brasília (UTC-3)."""
-    # Cria a hora atual no fuso horário do servidor (Naive)
     now_naive = dt.datetime.now()
-    # Aplica o offset de -3 horas (UTC-3, horário padrão de Brasília)
     now_br = now_naive - dt.timedelta(hours=3)
     return now_br
 
-# ===================== FUNÇÃO DE LEITURA PDF (CORRIGIDA DEFINITIVAMENTE) =====================
+# 🛑 NOVA FUNÇÃO: MAPEAMENTO POR APROXIMAÇÃO (FUZZY SIMPLIFICADO)
+def find_closest_sku(broken_sku: str, catalog_skus: set) -> str:
+    """
+    Tenta encontrar a melhor correspondência do SKU quebrado no catálogo,
+    usando a correspondência por prefixo (startswith).
+    """
+    # 1. Garante que o SKU a ser buscado está limpo (remove espaços, normaliza)
+    broken_sku = norm_sku(broken_sku).replace(' ', '')
+    if not broken_sku: return None
+    
+    # 2. Busca o SKU completo mais longo que COMEÇA com o SKU quebrado.
+    # Ordenamos por tamanho para pegar o SKU mais específico primeiro (ex: M-G vs M-G-P)
+    sorted_catalog = sorted([s for s in catalog_skus if s.startswith(broken_sku)], key=len, reverse=True)
+    
+    if sorted_catalog:
+        return sorted_catalog[0]
+        
+    return None
+
+def map_broken_skus(df_pdf: pd.DataFrame, catalogo_df: pd.DataFrame) -> pd.DataFrame:
+    """Aplica o mapeamento por aproximação aos SKUs lidos do PDF."""
+    if catalogo_df is None or catalogo_df.empty:
+        return df_pdf # Retorna o PDF bruto se o catálogo não estiver carregado
+        
+    catalog_skus = set(catalogo_df["component_sku"].apply(norm_sku).unique())
+    
+    # Mapeia cada SKU do PDF para o SKU correto do catálogo
+    df_pdf["SKU_Mapeado"] = df_pdf["SKU"].apply(lambda x: find_closest_sku(x, catalog_skus))
+    
+    # 🛑 Substitui o SKU original pelo mapeado e remove linhas que não puderam ser mapeadas
+    df_pdf["SKU"] = df_pdf["SKU_Mapeado"]
+    df_mapped = df_pdf.dropna(subset=["SKU"]).drop(columns=["SKU_Mapeado"]).copy()
+    
+    return df_mapped.groupby("SKU", as_index=False)["Qtd_Envio"].sum() # Agrupa novamente para somar quantidades mapeadas
+
+# ===================== FUNÇÃO DE LEITURA PDF (FINAL) =====================
 def extrair_dados_pdf_ml(pdf_bytes):
     """
     Lê o PDF de envio do ML com lógica robusta para montar SKUs quebrados
-    e garantir que a quantidade seja corretamente associada, mesmo em formatação ruim.
+    e garantir que a quantidade seja corretamente associada.
     """
     data = []
-    # 🛑 CORREÇÃO CRÍTICA: Adicionar \s (espaço) para capturar SKUs que estão quebrados por quebra de linha
+    # 🛑 CRÍTICO: Permite caracteres, hífens, barras E espaços (\s) para capturar o SKU completo, mesmo se quebrado.
     regex_sku = re.compile(r'SKU:?\s*([\w\-\/\s]+)', re.IGNORECASE)
-    # Regex para buscar a quantidade (números inteiros de 1 a 4 dígitos)
     regex_qtd = re.compile(r'\b(\d{1,4})\b') 
 
     try:
@@ -58,7 +89,7 @@ def extrair_dados_pdf_ml(pdf_bytes):
                         col_produto = str(row[0]).strip() if row[0] is not None else ""
                         col_qtd = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
                         
-                        # Limpa todas as quebras de linha/espaços múltiplos para remontar SKUs longos
+                        # Limpa quebras de linha e múltiplos espaços para remontar a string na célula
                         col_produto_clean = re.sub(r'[\n\r]+', ' ', col_produto).strip()
                         col_qtd_clean = re.sub(r'[\n\r]+', ' ', col_qtd).strip()
                         
@@ -66,42 +97,40 @@ def extrair_dados_pdf_ml(pdf_bytes):
                         skus_encontrados = regex_sku.findall(col_produto_clean)
                         qtds_encontradas = regex_qtd.findall(col_qtd_clean)
                         
-                        # 2. Tenta parear (ideal: número de SKUs coincide com QTDs)
+                        # 2. Tenta parear (ideal)
                         if skus_encontrados and len(skus_encontrados) == len(qtds_encontradas):
                             for sku, qty_str in zip(skus_encontrados, qtds_encontradas):
-                                # 🛑 IMPORTANTE: Remove o espaço extra que a regex tolerou antes de normalizar
-                                final_sku = norm_sku(sku.replace(' ', ''))
+                                # O SKU capturado pode ter espaços, será limpo pelo find_closest_sku
+                                final_sku_raw = sku.strip()
                                 try:
                                     qty = int(qty_str)
                                     if qty > 0:
-                                        data.append({"SKU": final_sku, "Qtd_Envio": qty})
+                                        data.append({"SKU": final_sku_raw, "Qtd_Envio": qty})
                                 except ValueError:
                                     pass
                         
-                        # 3. Fallback/Complemento: Se o pareamento falhou, busca a QTD de forma mais flexível
+                        # 3. Fallback/Complemento
                         elif col_produto_clean:
                             match_sku = regex_sku.search(col_produto_clean)
                             if match_sku:
-                                sku = match_sku.group(1)
-                                final_sku = norm_sku(sku.replace(' ', ''))
+                                sku = match_sku.group(1).strip()
                                 
-                                # Procura a QTD na coluna de QTD ou na própria célula de produto
                                 source_text = col_qtd_clean if col_qtd_clean else col_produto_clean
-                                
-                                # Busca a primeira quantidade válida na fonte de texto
                                 match_qty = regex_qtd.search(source_text)
+                                
                                 if match_qty:
                                     try:
                                         qty = int(match_qty.group(1))
                                         if qty > 0:
-                                            data.append({"SKU": final_sku, "Qtd_Envio": qty})
+                                            data.append({"SKU": sku, "Qtd_Envio": qty})
                                     except ValueError:
                                         pass
                 
-                # Fallback FINAL: Varre todo o texto da página (garantia máxima)
+                # Fallback FINAL: Varre todo o texto da página
                 text = page.extract_text()
                 if text:
                     for line in text.split('\n'):
+                        # Aqui usamos a regex antiga e mais restrita, pois o texto da página não tem as quebras de célula
                         match_full = re.search(r'SKU:?\s*([\w\-\/]+).*?(\b\d{1,4}\b)', line, re.IGNORECASE)
                         if match_full:
                             sku = match_full.group(1)
@@ -109,15 +138,14 @@ def extrair_dados_pdf_ml(pdf_bytes):
                             try:
                                 qty = int(qty_str)
                                 if qty > 0 and qty < 20000:
-                                    data.append({"SKU": norm_sku(sku), "Qtd_Envio": qty})
+                                    data.append({"SKU": sku, "Qtd_Envio": qty})
                             except ValueError:
                                 pass
                                 
-            # Final: Agrupa somando quantidades (essencial para eliminar duplicação e somar kits)
+            # Retorna o PDF bruto (com SKUs que precisam ser mapeados)
             df_final = pd.DataFrame(data).drop_duplicates()
-            df_final = df_final.groupby("SKU", as_index=False)["Qtd_Envio"].sum()
-            return df_final
-            
+            return df_final.groupby("SKU", as_index=False)["Qtd_Envio"].sum()
+
     except Exception as e:
         st.error(f"Erro CRÍTICO ao ler PDF: {e}")
         return pd.DataFrame()
@@ -452,7 +480,7 @@ with tab2:
                 if st.button(f"🛒 Enviar Selecionados ({emp}) para Editor", key=f"bt_{emp}"): 
                     add_to_cart(emp)
 
-# --- TAB 3: CRUZAR PDF FULL (CORRIGIDO COM EXPLOSÃO) ---
+# --- TAB 3: CRUZAR PDF FULL (CORRIGIDO COM EXPLOSÃO E FUZZY MATCH) ---
 with tab3:
     st.header("🚛 Cruzar PDF Full")
     st.info("⚠️ Para análise correta, calcule a aba 'Análise & Compra' primeiro. O Catálogo de Kits e Preços será usado na explosão.")
@@ -471,16 +499,23 @@ with tab3:
         if df_pdf_bruto.empty:
             st.error("Não consegui ler itens no PDF.")
         else:
-            # ================= LÓGICA DE EXPLOSÃO =================
+            # ================= LÓGICA DE FUZZY MATCH E EXPLOSÃO =================
             if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
                  st.error("Padrão de produtos não carregado. Não consigo explodir kits. Por favor, carregue na barra lateral.")
             else:
-                # O catálogo já está armazenado com o nome de coluna CORRETO (component_sku)
+                # 🛑 PASSO 1: MAPEAMENTO POR APROXIMAÇÃO (CORRIGE SKUS QUEBRADOS)
+                df_pdf_mapeado = map_broken_skus(df_pdf_bruto, st.session_state.catalogo_df)
+                
+                if df_pdf_mapeado.empty:
+                    st.error("Nenhum SKU do PDF pôde ser mapeado para um produto válido no seu catálogo.")
+                    st.write("SKUs não mapeados:", df_pdf_bruto["SKU"].tolist())
+                    st.stop()
+                    
                 cat_obj = Catalogo(st.session_state.catalogo_df, st.session_state.kits_df)
                 kits_validos = construir_kits_efetivo(cat_obj)
                 
-                # 2. Explode o PDF (Transforma 'Qtd_Envio' de Kits em 'Quantidade' de componentes)
-                df_exploded = explodir_por_kits(df_pdf_bruto, kits_validos, "SKU", "Qtd_Envio")
+                # 🛑 PASSO 2: Explode o PDF (agora com SKUs corretos)
+                df_exploded = explodir_por_kits(df_pdf_mapeado, kits_validos, "SKU", "Qtd_Envio")
                 
                 df_exploded = df_exploded.rename(columns={"Quantidade": "Qtd_Necessaria_Envio"})
                 
