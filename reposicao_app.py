@@ -42,7 +42,9 @@ def extrair_dados_pdf_ml(pdf_bytes):
     e garantir que a quantidade seja corretamente associada, mesmo em formatação ruim.
     """
     data = []
+    # Regex para buscar SKUs (letras, números, hífens, barras)
     regex_sku = re.compile(r'SKU:?\s*([\w\-\/]+)', re.IGNORECASE)
+    # Regex para buscar a quantidade (números inteiros de 1 a 4 dígitos)
     regex_qtd = re.compile(r'\b(\d{1,4})\b') 
 
     try:
@@ -50,14 +52,13 @@ def extrair_dados_pdf_ml(pdf_bytes):
             for page in pdf.pages:
                 tabela = page.extract_table()
                 if tabela:
-                    # Itera sobre a tabela, tratando células com quebras de linha
                     for row in tabela:
                         if not row or len(row) < 2: continue
                         
                         col_produto = str(row[0]).strip() if row[0] is not None else ""
                         col_qtd = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
                         
-                        # 🛑 CRÍTICO: Limpa todas as quebras de linha/espaços múltiplos para remontar SKUs longos
+                        # 🛑 CORREÇÃO CRÍTICA: Limpa todas as quebras de linha/espaços múltiplos para remontar SKUs longos
                         col_produto_clean = re.sub(r'[\n\r]+', ' ', col_produto).strip()
                         col_qtd_clean = re.sub(r'[\n\r]+', ' ', col_qtd).strip()
                         
@@ -243,8 +244,7 @@ def clear_file_cache(empresa, tipo):
     st.session_state[empresa][tipo] = {"name": None, "bytes": None, "timestamp": None}
     st.session_state[f"resultado_{empresa}"] = None # Limpa o cálculo da Tab 2
 
-    # 🛑 HACK DE LIMPEZA DE WIDGET: Reseta o estado do file_uploader
-    st.session_state[f"u_{empresa}_{tipo}"] = None
+    # 🛑 REMOVIDO HACK QUE CAUSAVA O CRASH: st.session_state[f"u_{empresa}_{tipo}"] = None
 
     if deleted:
         st.toast(f"Cache de {empresa} {tipo} limpo! Recarregando...", icon="🧹")
@@ -322,7 +322,8 @@ with tab1:
                 
                 # 🛑 LÓGICA DE DETECÇÃO DE NOVO ARQUIVO E SALVAMENTO 🛑
                 if f:
-                    # Verifica se o arquivo atual tem um nome diferente do que está no cache de sessão
+                    # Usamos a presença de 'f' e o nome do arquivo, que é a única forma de garantir
+                    # que o usuário não está re-uploading o mesmo arquivo teimoso.
                     is_new_upload = (f.name != curr_state.get("name")) 
 
                     if is_new_upload or not curr_state.get("name"):
