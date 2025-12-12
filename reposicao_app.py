@@ -92,7 +92,8 @@ def extrair_dados_pdf_ml(pdf_bytes):
                         qtds_encontradas = regex_qtd.findall(col_qtd_clean)
                         
                         # 🛑 CRÍTICO: SÓ PROCESSA SE TIVER PAREAMENTO PERFEITO (SKUS == QTDs)
-                        if skus_encontrados and len(skus_encontrados) == len(qtds_encontradas):
+                        # E a QTD deve vir da coluna de QTD, não da coluna de Produto.
+                        if skus_encontrados and len(skus_encontrados) == len(qtds_encontradas) and col_qtd_clean:
                             for sku, qty_str in zip(skus_encontrados, qtds_encontradas):
                                 final_sku_raw = sku.strip()
                                 try:
@@ -101,19 +102,19 @@ def extrair_dados_pdf_ml(pdf_bytes):
                                         data.append({"SKU": final_sku_raw, "Qtd_Envio": qty})
                                 except ValueError:
                                     pass
-                        
-                        # 🛑 O Fallback anterior (elif) foi REMOVIDO para evitar erro de quantidade.
-                        # O processo passa para a extração de texto puro se a leitura da tabela for ambígua.
-
                 
                 # 🛑 SEGUNDA TENTATIVA/FALLBACK: Extração por REGEX no texto puro da página (garantia total)
                 text = page.extract_text()
                 if text:
-                    # Regex simples para capturar SKUs e Qtds próximas
-                    regex_fallback = re.compile(r'SKU:?\s*([\w\-\/]+).*?(\b\d{1,4}\b)', re.IGNORECASE | re.DOTALL)
+                    # Regex para capturar SKU e forçar que a QTD esteja PRÓXIMA no fluxo de texto,
+                    # usando um limite de 50 caracteres (para pular a descrição do produto)
+                    regex_fallback = re.compile(r'SKU:?\s*([\w\-\/]+).{0,50}?(\b\d{1,4}\b)', re.IGNORECASE | re.DOTALL)
                     
                     matches = regex_fallback.findall(text)
                     for sku_raw, qty_str in matches:
+                        # 🛑 NOVA VALIDAÇÃO: Evita que o número "404" da descrição da CINTA seja lido como quantidade
+                        if "404" in sku_raw and qty_str == "404": continue
+                            
                         try:
                             qty = int(qty_str)
                             if qty > 0 and qty < 20000:
