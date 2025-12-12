@@ -26,7 +26,7 @@ def get_local_timestamp_path(empresa: str, tipo: str) -> str:
     """Retorna o caminho local para o arquivo de timestamp."""
     return os.path.join(STORAGE_DIR, f"{empresa}_{tipo}_time.txt")
 
-# 🛑 NOVA FUNÇÃO: Obtém a hora atual no fuso horário do Brasil (-03:00)
+# 🛑 Obtém a hora atual no fuso horário do Brasil (-03:00)
 def get_br_datetime() -> dt.datetime:
     """Retorna o datetime atual ajustado para o fuso horário de Brasília (UTC-3)."""
     # Cria a hora atual no fuso horário do servidor (Naive)
@@ -35,45 +35,38 @@ def get_br_datetime() -> dt.datetime:
     now_br = now_naive - dt.timedelta(hours=3)
     return now_br
 
-# ===================== FUNÇÃO DE LEITURA PDF (CORRIGIDA) =====================
+# ===================== FUNÇÃO DE LEITURA PDF (CORRIGIDA DEFINITIVAMENTE) =====================
 def extrair_dados_pdf_ml(pdf_bytes):
     """
-    Lê o PDF de envio do ML, agora com uma lógica de REGEX robusta
-    para extrair múltiplos SKUs e quantidades de células agrupadas ou quebradas.
+    Lê o PDF de envio do ML, agora com uma lógica de REGEX robusta para extrair
+    múltiplos SKUs e quantidades de células agrupadas ou quebradas, garantindo SKUs difíceis (regatas).
     """
     data = []
-    # Regex melhorada: Busca SKU e a Quantidade associada logo em seguida
+    # Regex para buscar SKUs (letras, números, hífens, barras)
     regex_sku = re.compile(r'SKU:?\s*([\w\-\/]+)', re.IGNORECASE)
-    # Regex 2: Tenta capturar a quantidade limpa (apenas números)
-    regex_qtd = re.compile(r'\s*\b(\d+)\s*') # Captura números inteiros
+    # Regex para buscar a quantidade (números inteiros de 1 a 4 dígitos)
+    regex_qtd = re.compile(r'\b(\d{1,4})\b') 
 
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for page in pdf.pages:
-                # Prioridade: Extração por Tabela
                 tabela = page.extract_table()
                 if tabela:
-                    # Tenta ler a tabela, assumindo que SKU/Detalhes estão na coluna 0 e QTD na coluna 1
                     for row in tabela:
                         if not row or len(row) < 2: continue
                         
                         col_produto = str(row[0]).strip() if row[0] is not None else ""
                         col_qtd = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
                         
-                        # Limpa quebras de linha e múltiplos espaços em branco para normalizar o texto
-                        col_produto_clean = re.sub(r'\s+', ' ', col_produto).strip()
-                        col_qtd_clean = re.sub(r'\s+', ' ', col_qtd).strip()
+                        # Limpa quebras de linha/espaços múltiplos para normalizar o texto
+                        col_produto_clean = re.sub(r'[\n\r]+', ' ', col_produto).strip()
+                        col_qtd_clean = re.sub(r'[\n\r]+', ' ', col_qtd).strip()
                         
-                        # 🛑 LÓGICA ROBUSTA PARA MÚLTIPLOS SKUS EM UMA CÉLULA
-                        
-                        # 1. Encontra todos os SKUs na coluna PRODUTO (coluna 0)
+                        # 1. Encontra todos os SKUs e QTDs nas respectivas colunas
                         skus_encontrados = regex_sku.findall(col_produto_clean)
-                        
-                        # 2. Encontra todas as quantidades na coluna UNIDADES (coluna 1)
-                        # A coluna de QTD muitas vezes tem quebras de linha se houver múltiplos itens
                         qtds_encontradas = regex_qtd.findall(col_qtd_clean)
                         
-                        # Se o número de SKUs e QTDs coincidir, assume-se que estão pareados
+                        # 2. Tenta parear (situação ideal)
                         if skus_encontrados and len(skus_encontrados) == len(qtds_encontradas):
                             for sku, qty_str in zip(skus_encontrados, qtds_encontradas):
                                 try:
@@ -81,42 +74,46 @@ def extrair_dados_pdf_ml(pdf_bytes):
                                     if qty > 0:
                                         data.append({"SKU": norm_sku(sku), "Qtd_Envio": qty})
                                 except ValueError:
-                                    pass # Ignora QTDs não numéricas
+                                    pass
                         
-                        # 3. Fallback/Complemento: Trata o caso de SKU único ou falha de pareamento
-                        elif len(skus_encontrados) == 1 and qtds_encontradas:
-                            # Caso simples: um SKU, pega a primeira quantidade válida
-                            sku = skus_encontrados[0]
-                            try:
-                                qty = int(qtds_encontradas[0])
-                                if qty > 0:
-                                    data.append({"SKU": norm_sku(sku), "Qtd_Envio": qty})
-                            except ValueError:
-                                pass
-
-
-                # Fallback para PDF sem tabela explícita (para garantir que os SKUs perdidos sejam lidos)
+                        # 3. Fallback/Complemento: Se o pareamento falhou ou o número é diferente, busca em toda a linha do produto
+                        elif col_produto_clean:
+                            # Busca o SKU e a QTD em qualquer lugar da célula (para SKUs como as regatas)
+                            match_sku = regex_sku.search(col_produto_clean)
+                            if match_sku:
+                                sku = match_sku.group(1)
+                                
+                                # Tenta buscar a QTD na coluna de QTD ou na própria célula de produto (se QTD estiver vazia)
+                                source_text = col_qtd_clean if col_qtd_clean else col_produto_clean
+                                
+                                # Busca a primeira quantidade válida na fonte de texto
+                                match_qty = regex_qtd.search(source_text)
+                                if match_qty:
+                                    try:
+                                        qty = int(match_qty.group(1))
+                                        if qty > 0:
+                                            data.append({"SKU": norm_sku(sku), "Qtd_Envio": qty})
+                                    except ValueError:
+                                        pass
+                
+                # Fallback FINAL: Varre todo o texto da página para garantir que nada foi perdido (para SKUs totalmente fora do padrão de tabela)
                 text = page.extract_text()
                 if text:
-                    # Regex que busca a linha inteira, procurando por 'SKU: XXX' e uma quantidade próxima
-                    # Ex: SKU: REGATA... XGG 114
-                    lines = text.split('\n')
-                    for line in lines:
-                        # Tenta encontrar SKU e QTD na mesma linha (ou linhas próximas)
+                    for line in text.split('\n'):
+                        # Regex que busca SKU seguido por qualquer texto (inclusive quebra de linha) e então a QTD
                         match_full = re.search(r'SKU:?\s*([\w\-\/]+).*?(\b\d{1,4}\b)', line, re.IGNORECASE)
                         if match_full:
                             sku = match_full.group(1)
                             qty_str = match_full.group(2)
                             try:
                                 qty = int(qty_str)
-                                if qty > 0 and qty < 20000: # Filtra números muito grandes (códigos de barras, etc)
+                                if qty > 0 and qty < 20000:
                                     data.append({"SKU": norm_sku(sku), "Qtd_Envio": qty})
                             except ValueError:
                                 pass
                                 
-            # Final: Limpa duplicatas e retorna
-            df_final = pd.DataFrame(data).drop_duplicates(subset=["SKU"])
-            # Agrupa os SKUs que foram encontrados múltiplas vezes (devido ao fallback) somando as quantidades
+            # Final: Agrupa somando quantidades (essencial para eliminar duplicação do fallback e somar kits explodidos)
+            df_final = pd.DataFrame(data).drop_duplicates()
             df_final = df_final.groupby("SKU", as_index=False)["Qtd_Envio"].sum()
             return df_final
             
@@ -324,9 +321,9 @@ with tab1:
                 
                 
                 # 🛑 LÓGICA DE DETECÇÃO DE NOVO ARQUIVO E SALVAMENTO 🛑
-                # Streamlit detecta que 'f' mudou.
                 if f:
-                    # Usamos a presença de 'f' e garantimos que o nome não é idêntico ao carregado para o cache:
+                    # Usamos a presença de 'f' e o nome do arquivo, que é a única forma de garantir
+                    # que o usuário não está re-uploading o mesmo arquivo teimoso.
                     is_new_upload = (f.name != curr_state.get("name")) 
 
                     if is_new_upload or not curr_state.get("name"):
