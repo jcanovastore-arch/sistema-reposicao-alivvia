@@ -14,7 +14,6 @@ from src.config import DEFAULT_SHEET_LINK, STORAGE_DIR
 # format_br_int é necessário para formatar os valores inteiros corretamente
 from src.utils import style_df_compra, norm_sku, format_br_currency, format_br_int 
 # _carregar_padrao_de_content é necessária para o upload manual de planilha
-# CRÍTICO: Reimportar get_local_file_path e get_local_name_path, e definir get_local_timestamp_path
 from src.data import get_local_file_path, get_local_name_path, load_any_table_from_bytes, carregar_padrao_local_ou_sheets, _carregar_padrao_de_content
 # ESSENCIAL: Inclusão das funções de Kit e cálculo
 from src.logic import Catalogo, mapear_colunas, calcular, explodir_por_kits, construir_kits_efetivo
@@ -22,10 +21,11 @@ from src.orders_db import gerar_numero_oc, salvar_pedido, listar_pedidos, atuali
 
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
-# ===================== FUNÇÕES DE CAMINHO DE CACHE (Para o Timestamp) =====================
+# ===================== FUNÇÕES DE CAMINHO DE CACHE =====================
+# É CRÍTICO que esta função exista para gerenciar o timestamp
 def get_local_timestamp_path(empresa: str, tipo: str) -> str:
     """Retorna o caminho local para o arquivo de timestamp."""
-    # Assumindo que STORAGE_DIR é importado de src.config
+    # Assume que STORAGE_DIR está definido em src.config
     return os.path.join(STORAGE_DIR, f"{empresa}_{tipo}_time.txt")
 
 
@@ -119,6 +119,7 @@ def _ensure_state():
                         if os.path.exists(t):
                              with open(t, 'r') as f: st.session_state[emp][ft]["timestamp"] = f.read().strip()
                         else:
+                             # Fallback: USA A DATA DE MODIFICAÇÃO DO ARQUIVO .BIN
                              st.session_state[emp][ft]["timestamp"] = dt.datetime.fromtimestamp(os.path.getmtime(p)).strftime("%d/%m/%Y %H:%M:%S")
 
                 except: 
@@ -190,7 +191,7 @@ def clear_file_cache(empresa, tipo):
     """Remove o arquivo .bin, .txt e _time.txt do cache local"""
     file_path = get_local_file_path(empresa, tipo)
     name_path = get_local_name_path(empresa, tipo)
-    time_path = get_local_timestamp_path(empresa, tipo) # CRÍTICO: Novo path
+    time_path = get_local_timestamp_path(empresa, tipo) 
     
     deleted = False
     if os.path.exists(file_path):
@@ -199,7 +200,7 @@ def clear_file_cache(empresa, tipo):
     if os.path.exists(name_path):
         os.remove(name_path)
         deleted = True
-    if os.path.exists(time_path): # CRÍTICO: Deleta o timestamp
+    if os.path.exists(time_path): 
         os.remove(time_path)
         
     # CRÍTICO: Resetar a sessão para forçar o recálculo
@@ -272,29 +273,35 @@ with tab1:
             for ft in ["FULL", "VENDAS", "ESTOQUE"]:
                 curr_state = st.session_state[emp][ft]
                 
-                f = st.file_uploader(f"Upload {ft}", type=["xlsx", "csv"], key=f"u_{emp}_{ft}")
+                f = st.file_uploader(f"Upload {ft}", type=["xlsx", "csv", "pdf"], key=f"u_{emp}_{ft}")
                 
                 if f:
                     # Lógica de Sobrescrita e Timestamp
                     time_path = get_local_timestamp_path(emp, ft)
+                    
+                    # Usa a variável 'f' para obter o nome e conteúdo AGORA
+                    file_bytes = f.getvalue()
+                    file_name = f.name
                     timestamp_str = dt.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
                     # 1. Salva o conteúdo do arquivo (sobrescreve o .bin)
-                    with open(get_local_file_path(emp, ft), 'wb') as fb: fb.write(f.read())
+                    with open(get_local_file_path(emp, ft), 'wb') as fb: fb.write(file_bytes)
                     # 2. Salva o nome do arquivo (sobrescreve o .txt)
-                    with open(get_local_name_path(emp, ft), 'w') as fn: fn.write(f.name)
+                    with open(get_local_name_path(emp, ft), 'w') as fn: fn.write(file_name)
                     # 3. Salva o timestamp (sobrescreve o _time.txt)
                     with open(time_path, 'w') as ft_w: ft_w.write(timestamp_str)
                     
                     # 4. Atualiza a sessão para o novo arquivo
-                    st.session_state[emp][ft] = {"name": f.name, "bytes": f.getvalue(), "timestamp": timestamp_str}
+                    st.session_state[emp][ft] = {"name": file_name, "bytes": file_bytes, "timestamp": timestamp_str}
                     st.toast("✅ Arquivo Salvo e Sobrescrito!")
-                    time.sleep(1)
-                    st.rerun() # Força o re-render
-                
+                    
+                    # 🛑 CRÍTICO: REMOVE st.rerun() e time.sleep(1) para evitar loop e piscadas
+                    
+                # A lógica de exibição está correta (agora que o flow control foi corrigido)
                 if curr_state["name"]:
                     st.caption(f"**Nome:** {curr_state['name']}")
-                    st.caption(f"**Data Upload:** {curr_state['timestamp']}")
+                    # CRÍTICO: O timestamp deve vir do estado da sessão
+                    st.caption(f"**Data Upload:** {curr_state['timestamp'] if curr_state['timestamp'] else 'Carregado de Versão Antiga'}")
                     
                     if st.button("🧹 Limpar Cache", key=f"clean_{emp}_{ft}"):
                         clear_file_cache(emp, ft)
@@ -395,7 +402,7 @@ with tab3:
     st.info("⚠️ Para análise correta, calcule a aba 'Análise & Compra' primeiro. O Catálogo de Kits e Preços será usado na explosão.")
 
     emp_pdf = st.radio("Empresa do Envio:", ["ALIVVIA", "JCA"], horizontal=True, key="emp_pdf_full")
-    pdf_file = st.file_uploader("Upload PDF de Instruções de Preparação", type=["pdf"], key="pdf_full_upload")
+    pdf_file = st.file_uploader("Upload PDF de Instruções de Preparação", type=["pdf"], key="pdf_full_upload_tab3")
     
     df_res = st.session_state.get(f"resultado_{emp_pdf}") # Estoque Físico e Preços vêm da Tab 2
     
