@@ -38,14 +38,11 @@ def get_br_datetime() -> dt.datetime:
 # ===================== FUNÇÃO DE LEITURA PDF (CORRIGIDA DEFINITIVAMENTE) =====================
 def extrair_dados_pdf_ml(pdf_bytes):
     """
-    Lê o PDF de envio do ML, agora com uma lógica de REGEX robusta para extrair
-    múltiplos SKUs e quantidades de células agrupadas ou quebradas, garantindo SKUs difíceis (regatas).
+    Lê o PDF de envio do ML com lógica robusta para montar SKUs quebrados
+    e garantir que a quantidade seja corretamente associada, mesmo em formatação ruim.
     """
     data = []
-    # Regex para buscar SKUs (letras, números, hífens, barras)
-    # A busca é case-insensitive e captura SKUs com hífen
     regex_sku = re.compile(r'SKU:?\s*([\w\-\/]+)', re.IGNORECASE)
-    # Regex para buscar a quantidade (números inteiros de 1 a 4 dígitos)
     regex_qtd = re.compile(r'\b(\d{1,4})\b') 
 
     try:
@@ -53,21 +50,22 @@ def extrair_dados_pdf_ml(pdf_bytes):
             for page in pdf.pages:
                 tabela = page.extract_table()
                 if tabela:
+                    # Itera sobre a tabela, tratando células com quebras de linha
                     for row in tabela:
                         if not row or len(row) < 2: continue
                         
                         col_produto = str(row[0]).strip() if row[0] is not None else ""
                         col_qtd = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
                         
-                        # 🛑 CORREÇÃO CRÍTICA: Limpa quebras de linha e múltiplos espaços para remontar SKUs quebrados
+                        # 🛑 CRÍTICO: Limpa todas as quebras de linha/espaços múltiplos para remontar SKUs longos
                         col_produto_clean = re.sub(r'[\n\r]+', ' ', col_produto).strip()
                         col_qtd_clean = re.sub(r'[\n\r]+', ' ', col_qtd).strip()
                         
-                        # 1. Encontra todos os SKUs e QTDs nas respectivas colunas
+                        # 1. Encontra SKUs e QTDs
                         skus_encontrados = regex_sku.findall(col_produto_clean)
                         qtds_encontradas = regex_qtd.findall(col_qtd_clean)
                         
-                        # 2. Tenta parear (situação ideal: número de SKUs coincide com QTDs)
+                        # 2. Tenta parear (ideal: número de SKUs coincide com QTDs)
                         if skus_encontrados and len(skus_encontrados) == len(qtds_encontradas):
                             for sku, qty_str in zip(skus_encontrados, qtds_encontradas):
                                 try:
@@ -77,7 +75,7 @@ def extrair_dados_pdf_ml(pdf_bytes):
                                 except ValueError:
                                     pass
                         
-                        # 3. Fallback/Complemento (para SKUs onde a QTD está na célula errada ou o pareamento falhou)
+                        # 3. Fallback/Complemento: Se o pareamento falhou, busca a QTD de forma mais flexível
                         elif col_produto_clean:
                             match_sku = regex_sku.search(col_produto_clean)
                             if match_sku:
@@ -92,7 +90,6 @@ def extrair_dados_pdf_ml(pdf_bytes):
                                     try:
                                         qty = int(match_qty.group(1))
                                         if qty > 0:
-                                            # Adiciona se ainda não foi adicionado pelo pareamento (garantia de inclusão)
                                             data.append({"SKU": norm_sku(sku), "Qtd_Envio": qty})
                                     except ValueError:
                                         pass
@@ -227,7 +224,7 @@ def add_to_cart(emp):
     st.toast(f"{c} itens adicionados!")
     
 def clear_file_cache(empresa, tipo):
-    """Remove o arquivo .bin, .txt e _time.txt do cache local"""
+    """Remove o arquivo .bin, .txt e _time.txt do cache local E reseta o widget."""
     file_path = get_local_file_path(empresa, tipo)
     name_path = get_local_name_path(empresa, tipo)
     time_path = get_local_timestamp_path(empresa, tipo) 
@@ -245,7 +242,10 @@ def clear_file_cache(empresa, tipo):
     # CRÍTICO: Resetar a sessão para forçar o recálculo
     st.session_state[empresa][tipo] = {"name": None, "bytes": None, "timestamp": None}
     st.session_state[f"resultado_{empresa}"] = None # Limpa o cálculo da Tab 2
-    
+
+    # 🛑 HACK DE LIMPEZA DE WIDGET: Reseta o estado do file_uploader
+    st.session_state[f"u_{empresa}_{tipo}"] = None
+
     if deleted:
         st.toast(f"Cache de {empresa} {tipo} limpo! Recarregando...", icon="🧹")
         time.sleep(1) # Pequena pausa para garantir a mensagem
@@ -322,8 +322,7 @@ with tab1:
                 
                 # 🛑 LÓGICA DE DETECÇÃO DE NOVO ARQUIVO E SALVAMENTO 🛑
                 if f:
-                    # Usamos a presença de 'f' e o nome do arquivo, que é a única forma de garantir
-                    # que o usuário não está re-uploading o mesmo arquivo teimoso.
+                    # Verifica se o arquivo atual tem um nome diferente do que está no cache de sessão
                     is_new_upload = (f.name != curr_state.get("name")) 
 
                     if is_new_upload or not curr_state.get("name"):
