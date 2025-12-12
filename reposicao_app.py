@@ -10,16 +10,24 @@ import numpy as np # Necessário para lógica dos kits
 from typing import Optional, Tuple
 
 # Imports internos
-from src.config import DEFAULT_SHEET_LINK
+from src.config import DEFAULT_SHEET_LINK, STORAGE_DIR
 # format_br_int é necessário para formatar os valores inteiros corretamente
 from src.utils import style_df_compra, norm_sku, format_br_currency, format_br_int 
 # _carregar_padrao_de_content é necessária para o upload manual de planilha
+# CRÍTICO: Reimportar get_local_file_path e get_local_name_path, e definir get_local_timestamp_path
 from src.data import get_local_file_path, get_local_name_path, load_any_table_from_bytes, carregar_padrao_local_ou_sheets, _carregar_padrao_de_content
 # ESSENCIAL: Inclusão das funções de Kit e cálculo
 from src.logic import Catalogo, mapear_colunas, calcular, explodir_por_kits, construir_kits_efetivo
 from src.orders_db import gerar_numero_oc, salvar_pedido, listar_pedidos, atualizar_status, excluir_pedido_db
 
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
+
+# ===================== FUNÇÕES DE CAMINHO DE CACHE (Para o Timestamp) =====================
+def get_local_timestamp_path(empresa: str, tipo: str) -> str:
+    """Retorna o caminho local para o arquivo de timestamp."""
+    # Assumindo que STORAGE_DIR é importado de src.config
+    return os.path.join(STORAGE_DIR, f"{empresa}_{tipo}_time.txt")
+
 
 # ===================== FUNÇÃO DE LEITURA PDF =====================
 def extrair_dados_pdf_ml(pdf_bytes):
@@ -91,16 +99,30 @@ def _ensure_state():
     for emp in ["ALIVVIA", "JCA"]:
         if emp not in st.session_state: st.session_state[emp] = {}
         for ft in ["FULL", "VENDAS", "ESTOQUE"]:
-            if ft not in st.session_state[emp]: st.session_state[emp][ft] = {"name": None, "bytes": None}
+            # CRÍTICO: Atualiza o default para incluir 'timestamp'
+            if ft not in st.session_state[emp] or "timestamp" not in st.session_state[emp][ft]: 
+                st.session_state[emp][ft] = {"name": None, "bytes": None, "timestamp": None}
+            
             # Tenta carregar cache local
             if not st.session_state[emp][ft]["name"]:
                 try:
                     p = get_local_file_path(emp, ft)
                     n = get_local_name_path(emp, ft)
+                    t = get_local_timestamp_path(emp, ft)
+                    
                     if os.path.exists(p):
+                        # Carrega bytes e nome
                         with open(p, 'rb') as f: st.session_state[emp][ft]["bytes"] = f.read()
                         with open(n, 'r') as f: st.session_state[emp][ft]["name"] = f.read().strip()
-                except: pass
+                        
+                        # Carrega timestamp
+                        if os.path.exists(t):
+                             with open(t, 'r') as f: st.session_state[emp][ft]["timestamp"] = f.read().strip()
+                        else:
+                             st.session_state[emp][ft]["timestamp"] = dt.datetime.fromtimestamp(os.path.getmtime(p)).strftime("%d/%m/%Y %H:%M:%S")
+
+                except: 
+                    st.session_state[emp][ft] = {"name": None, "bytes": None, "timestamp": None}
 _ensure_state()
 
 # ===================== FUNÇÕES UI =====================
@@ -165,9 +187,10 @@ def add_to_cart(emp):
     st.toast(f"{c} itens adicionados!")
     
 def clear_file_cache(empresa, tipo):
-    """Remove o arquivo .bin e .txt do cache local"""
+    """Remove o arquivo .bin, .txt e _time.txt do cache local"""
     file_path = get_local_file_path(empresa, tipo)
     name_path = get_local_name_path(empresa, tipo)
+    time_path = get_local_timestamp_path(empresa, tipo) # CRÍTICO: Novo path
     
     deleted = False
     if os.path.exists(file_path):
@@ -176,21 +199,23 @@ def clear_file_cache(empresa, tipo):
     if os.path.exists(name_path):
         os.remove(name_path)
         deleted = True
+    if os.path.exists(time_path): # CRÍTICO: Deleta o timestamp
+        os.remove(time_path)
         
-    st.session_state[empresa][tipo]["name"] = None
-    st.session_state[empresa][tipo]["bytes"] = None
+    # CRÍTICO: Resetar a sessão para forçar o recálculo
+    st.session_state[empresa][tipo] = {"name": None, "bytes": None, "timestamp": None}
+    st.session_state[f"resultado_{empresa}"] = None # Limpa o cálculo da Tab 2
     
     if deleted:
         st.toast(f"Cache de {empresa} {tipo} limpo!", icon="🧹")
         time.sleep(1)
         st.rerun()
 
-# 🛑 NOVA FUNÇÃO: Resetar o Catálogo Mestre (Limpa a sessão)
 def reset_master_data():
     st.session_state.catalogo_df = None
     st.session_state.kits_df = None
     st.toast("Dados Mestre (Catálogo e Kits) limpos! Recarregue-os.", icon="🧹")
-    # Não precisa de st.rerun() pois o st.button já vai forçar um rerun após o on_click
+    st.rerun() 
 
 # ===================== SIDEBAR =====================
 with st.sidebar:
@@ -205,7 +230,7 @@ with st.sidebar:
     if st.button("🔄 Baixar do Google Sheets"):
         try:
             c, origem = carregar_padrao_local_ou_sheets(DEFAULT_SHEET_LINK)
-            # 🛑 CORREÇÃO CRÍTICA: Manter o nome 'component_sku' que logic.py espera.
+            # CRÍTICO: Manter o nome 'component_sku' que logic.py espera.
             st.session_state.catalogo_df = c.catalogo_simples
             st.session_state.kits_df = c.kits_reais
             st.success(f"Carregado via {origem}!")
@@ -218,7 +243,7 @@ with st.sidebar:
         try:
             from src.data import _carregar_padrao_de_content 
             c = _carregar_padrao_de_content(up_manual.getvalue())
-            # 🛑 CORREÇÃO CRÍTICA: Manter o nome 'component_sku' que logic.py espera.
+            # CRÍTICO: Manter o nome 'component_sku' que logic.py espera.
             st.session_state.catalogo_df = c.catalogo_simples
             st.session_state.kits_df = c.kits_reais
             st.success("✅ Arquivo carregado manualmente!")
@@ -226,9 +251,8 @@ with st.sidebar:
             st.error(f"Erro no arquivo: {e}")
 
     st.divider()
-    # 🛑 NOVO BOTÃO DE LIMPEZA DO CATÁLOGO
-    if st.button("🧹 Limpar Dados Mestre (Catálogo/Kits)", type="secondary", on_click=reset_master_data):
-        pass # A função on_click já executa o reset e o toast
+    # NOVO BOTÃO DE LIMPEZA DO CATÁLOGO
+    st.button("🧹 Limpar Dados Mestre (Catálogo/Kits)", type="secondary", on_click=reset_master_data)
 
 st.title("Reposição Logística — Alivvia")
 if st.session_state.catalogo_df is None: st.warning("⚠️ Carregue o Padrão de Produtos no menu lateral.")
@@ -236,27 +260,43 @@ if st.session_state.catalogo_df is None: st.warning("⚠️ Carregue o Padrão d
 # 🛑 LAYOUT DE 6 ABAS RESTAURADO
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📂 Uploads", "🔍 Análise & Compra", "🚛 Cruzar PDF Full", "📝 Editor OC", "🗂️ Gestão", "📦 Alocação"])
 
-# --- TAB 1: UPLOADS ---
+# --- TAB 1: UPLOADS (CORRIGIDO PARA UNICIDADE E TIMESTAMP) ---
 with tab1:
+    st.subheader("⚠️ Arquivos Operacionais (Vendas, Estoque, Full)")
+    st.info("Apenas o último arquivo carregado para cada tipo é mantido no cache local para garantir a unicidade dos dados.")
+    
     c1, c2 = st.columns(2)
     def up_block(emp, col):
         with col:
-            st.subheader(emp)
+            st.markdown(f"### {emp}")
             for ft in ["FULL", "VENDAS", "ESTOQUE"]:
                 curr_state = st.session_state[emp][ft]
                 
-                f = st.file_uploader(ft, key=f"u_{emp}_{ft}")
+                f = st.file_uploader(f"Upload {ft}", type=["xlsx", "csv"], key=f"u_{emp}_{ft}")
                 
                 if f:
+                    # Lógica de Sobrescrita e Timestamp
+                    time_path = get_local_timestamp_path(emp, ft)
+                    timestamp_str = dt.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+                    # 1. Salva o conteúdo do arquivo (sobrescreve o .bin)
                     with open(get_local_file_path(emp, ft), 'wb') as fb: fb.write(f.read())
+                    # 2. Salva o nome do arquivo (sobrescreve o .txt)
                     with open(get_local_name_path(emp, ft), 'w') as fn: fn.write(f.name)
-                    st.session_state[emp][ft] = {"name": f.name, "bytes": f.getvalue()}
-                    st.success("Salvo!")
+                    # 3. Salva o timestamp (sobrescreve o _time.txt)
+                    with open(time_path, 'w') as ft_w: ft_w.write(timestamp_str)
+                    
+                    # 4. Atualiza a sessão para o novo arquivo
+                    st.session_state[emp][ft] = {"name": f.name, "bytes": f.getvalue(), "timestamp": timestamp_str}
+                    st.toast("✅ Arquivo Salvo e Sobrescrito!")
+                    time.sleep(1)
+                    st.rerun() # Força o re-render
                 
                 if curr_state["name"]:
-                    col_name, col_btn = st.columns([3, 1])
-                    col_name.caption(f"✅ {curr_state['name']}")
-                    if col_btn.button("🧹 Limpar", key=f"clean_{emp}_{ft}"):
+                    st.caption(f"**Nome:** {curr_state['name']}")
+                    st.caption(f"**Data Upload:** {curr_state['timestamp']}")
+                    
+                    if st.button("🧹 Limpar Cache", key=f"clean_{emp}_{ft}"):
                         clear_file_cache(emp, ft)
 
     up_block("ALIVVIA", c1); up_block("JCA", c2)
@@ -526,7 +566,7 @@ with tab4:
     
     ed = st.data_editor(
         df_exibir, 
-        num_rows="dynamic", # Permite ADICIONAR LINHAS
+        num_rows="dynamic", # Permite ADICIONar LINHAS
         use_container_width=True, 
         key="ed_oc",
         column_config=col_config,
