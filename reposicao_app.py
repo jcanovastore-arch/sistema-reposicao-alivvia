@@ -29,18 +29,16 @@ def get_br_datetime() -> dt.datetime:
     now_br = now_naive - dt.timedelta(hours=3)
     return now_br
 
-# 🛑 NOVA FUNÇÃO: MAPEAMENTO POR APROXIMAÇÃO (FUZZY SIMPLIFICADO)
+# 🛑 FUNÇÃO: MAPEAMENTO POR APROXIMAÇÃO (FUZZY SIMPLIFICADO)
 def find_closest_sku(broken_sku: str, catalog_skus: set) -> Optional[str]:
     """
     Tenta encontrar a melhor correspondência do SKU quebrado no catálogo,
     usando a correspondência por prefixo (startswith).
     """
-    # 1. Limpa o SKU bruto removendo espaços/quebras de linha
     broken_sku = norm_sku(broken_sku).replace(' ', '').replace('\n', '')
     if not broken_sku: return None
     
-    # 2. Busca o SKU completo mais longo que COMEÇA com o SKU quebrado.
-    # Isso corrige SKUs incompletos (REGATAQUEIMAMA-) e pequenos erros de digitação (LUVA-NEOPRENE-PRETAG)
+    # Busca o SKU completo mais longo que COMEÇA com o SKU quebrado.
     sorted_catalog = sorted([s for s in catalog_skus if s.startswith(broken_sku)], key=len, reverse=True)
     
     if sorted_catalog:
@@ -53,24 +51,20 @@ def map_broken_skus(df_pdf: pd.DataFrame, catalogo_df: pd.DataFrame) -> pd.DataF
     if catalogo_df is None or catalogo_df.empty:
         return df_pdf
         
-    # CRÍTICO: Usa o 'component_sku' do catálogo
     catalog_skus = set(catalogo_df["component_sku"].apply(norm_sku).unique())
     
-    # Mapeia cada SKU do PDF para o SKU correto do catálogo
     df_pdf["SKU_Mapeado"] = df_pdf["SKU"].apply(lambda x: find_closest_sku(x, catalog_skus))
     
-    # Substitui o SKU original pelo mapeado e remove linhas que não puderam ser mapeadas
     df_pdf["SKU"] = df_pdf["SKU_Mapeado"]
     df_mapped = df_pdf.dropna(subset=["SKU"]).drop(columns=["SKU_Mapeado"]).copy()
     
-    # Agrupa novamente para somar quantidades de SKUs que foram mapeados para o mesmo SKU real
     return df_mapped.groupby("SKU", as_index=False)["Qtd_Envio"].sum() 
 
 # ===================== FUNÇÃO DE LEITURA PDF (FINAL E ROBUSTA) =====================
 def extrair_dados_pdf_ml(pdf_bytes):
     """
-    Lê o PDF de envio do ML usando extração de tabela e um forte fallback de REGEX
-    para garantir que SKUs quebrados sejam capturados.
+    Lê o PDF de envio do ML usando extração de tabela (apenas pareamento perfeito) 
+    e um forte fallback de REGEX para texto puro.
     """
     data = []
     # Permite letras, números, hífens, barras E espaços (\s)
@@ -97,6 +91,7 @@ def extrair_dados_pdf_ml(pdf_bytes):
                         skus_encontrados = regex_sku_table.findall(col_produto_clean)
                         qtds_encontradas = regex_qtd.findall(col_qtd_clean)
                         
+                        # 🛑 CRÍTICO: SÓ PROCESSA SE TIVER PAREAMENTO PERFEITO (SKUS == QTDs)
                         if skus_encontrados and len(skus_encontrados) == len(qtds_encontradas):
                             for sku, qty_str in zip(skus_encontrados, qtds_encontradas):
                                 final_sku_raw = sku.strip()
@@ -106,25 +101,15 @@ def extrair_dados_pdf_ml(pdf_bytes):
                                         data.append({"SKU": final_sku_raw, "Qtd_Envio": qty})
                                 except ValueError:
                                     pass
-                        elif col_produto_clean:
-                            match_sku = regex_sku_table.search(col_produto_clean)
-                            if match_sku:
-                                sku = match_sku.group(1).strip()
-                                source_text = col_qtd_clean if col_qtd_clean else col_produto_clean
-                                match_qty = regex_qtd.search(source_text)
-                                if match_qty:
-                                    try:
-                                        qty = int(match_qty.group(1))
-                                        if qty > 0:
-                                            data.append({"SKU": sku, "Qtd_Envio": qty})
-                                    except ValueError:
-                                        pass
+                        
+                        # 🛑 O Fallback anterior (elif) foi REMOVIDO para evitar erro de quantidade.
+                        # O processo passa para a extração de texto puro se a leitura da tabela for ambígua.
+
                 
                 # 🛑 SEGUNDA TENTATIVA/FALLBACK: Extração por REGEX no texto puro da página (garantia total)
                 text = page.extract_text()
                 if text:
                     # Regex simples para capturar SKUs e Qtds próximas
-                    # re.DOTALL é crucial para que o . combine com quebras de linha, tratando o texto como um todo.
                     regex_fallback = re.compile(r'SKU:?\s*([\w\-\/]+).*?(\b\d{1,4}\b)', re.IGNORECASE | re.DOTALL)
                     
                     matches = regex_fallback.findall(text)
@@ -508,10 +493,6 @@ with tab3:
                     st.error("Nenhum SKU do PDF pôde ser mapeado para um produto válido no seu catálogo. Verifique o Padrão de Produtos (Dados Mestre).")
                     # Mostra os SKUs que foram lidos mas não mapeados
                     st.caption("SKUs lidos do PDF (Bruto) que não foram mapeados:")
-                    # Identifica quais SKUs em df_pdf_bruto não estão no df_pdf_mapeado
-                    mapped_skus = set(df_pdf_mapeado["SKU"].unique())
-                    # Para garantir a exibição, se o mapeamento falhar, a coluna 'SKU_Mapeado' em map_broken_skus será None, mas aqui só temos o df_pdf_bruto
-                    # Mostra o que veio do PDF bruto:
                     st.dataframe(df_pdf_bruto[["SKU", "Qtd_Envio"]], hide_index=True)
                     st.stop()
                         
