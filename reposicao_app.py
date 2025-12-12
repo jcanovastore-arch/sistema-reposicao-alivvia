@@ -34,6 +34,7 @@ def find_closest_sku(broken_sku: str, catalog_skus: set) -> Optional[str]:
     """
     Tenta encontrar a melhor correspondência do SKU quebrado no catálogo.
     """
+    # Remove espaços e quebras de linha para comparação limpa
     broken_sku = norm_sku(broken_sku).replace(' ', '').replace('\n', '')
     if not broken_sku: return None
     
@@ -54,25 +55,25 @@ def map_broken_skus(df_pdf: pd.DataFrame, catalogo_df: pd.DataFrame) -> pd.DataF
     
     df_pdf["SKU_Mapeado"] = df_pdf["SKU"].apply(lambda x: find_closest_sku(x, catalog_skus))
     
-    df_pdf["SKU"] = df_pdf["SKU_Mapeado"]
-    df_mapped = df_pdf.dropna(subset=["SKU"]).drop(columns=["SKU_Mapeado"]).copy()
+    # Filtra apenas o que conseguiu mapear
+    df_mapped = df_pdf.dropna(subset=["SKU_Mapeado"]).copy()
+    df_mapped["SKU"] = df_mapped["SKU_Mapeado"]
     
     return df_mapped.groupby("SKU", as_index=False)["Qtd_Envio"].sum() 
 
 # ===================== FUNÇÕES DE LEITURA (PDF E EXCEL/CSV) =====================
 
 def extrair_dados_excel_ml(file_obj) -> pd.DataFrame:
-    """Lê o arquivo Excel/CSV convertido do PDF, que é MUITO mais seguro."""
+    """Lê o arquivo Excel/CSV convertido do PDF com Regex ESTRITA."""
     try:
-        # Tenta ler como CSV ou Excel dependendo da extensão ou tenta ambos
+        # Tenta ler como CSV ou Excel
         try:
             df = pd.read_csv(file_obj, sep=None, engine='python')
         except:
             file_obj.seek(0)
             df = pd.read_excel(file_obj)
             
-        # Procura a linha de cabeçalho (que contém "UNIDADES" e "PRODUTO")
-        # O arquivo do ML geralmente tem um cabeçalho nas primeiras linhas
+        # Procura a linha de cabeçalho
         header_row = None
         for i in range(min(20, len(df))):
             row_vals = df.iloc[i].astype(str).str.upper().tolist()
@@ -93,7 +94,10 @@ def extrair_dados_excel_ml(file_obj) -> pd.DataFrame:
             return pd.DataFrame()
             
         data = []
-        regex_sku = re.compile(r'SKU:?\s*([\w\-\/\s]+)', re.IGNORECASE)
+        # 🛑 REGEX V38: [\w\-\/]+
+        # Isso significa: Pegue letras, números, hífens e barras.
+        # PARE assim que encontrar um espaço ou quebra de linha.
+        regex_sku = re.compile(r'SKU:?\s*([\w\-\/]+)', re.IGNORECASE)
         
         for _, row in df.iterrows():
             prod_text = str(row[col_prod])
@@ -104,8 +108,10 @@ def extrair_dados_excel_ml(file_obj) -> pd.DataFrame:
             if match:
                 sku = match.group(1).strip()
                 try:
-                    # Limpa a quantidade (pode vir como string "160" ou float 160.0)
-                    qtd = int(float(str(qtd_val).replace(',', '.')))
+                    # Limpa a quantidade
+                    qtd_str = str(qtd_val).replace(',', '.')
+                    if not qtd_str.strip(): continue
+                    qtd = int(float(qtd_str))
                     if qtd > 0:
                         data.append({"SKU": sku, "Qtd_Envio": qtd})
                 except:
@@ -118,10 +124,7 @@ def extrair_dados_excel_ml(file_obj) -> pd.DataFrame:
         return pd.DataFrame()
 
 def extrair_dados_pdf_ml(pdf_bytes):
-    """
-    Lê o PDF usando a estratégia de BLOCOS (V36), que isola cada item para evitar
-    erros de leitura de quantidade vizinha.
-    """
+    """Lê o PDF usando a estratégia de BLOCOS (V36)."""
     data = []
     regex_sku_finder = re.compile(r'SKU:?\s*([\w\-\/\s]+)', re.IGNORECASE)
     regex_qtd_finder = re.compile(r'\b(\d{1,5})\b') 
@@ -132,10 +135,9 @@ def extrair_dados_pdf_ml(pdf_bytes):
                 text = page.extract_text()
                 if not text: continue
 
-                # VACINA 404: Remove o número da descrição da cinta
-                text = text.replace("404", "XXX")
+                text = text.replace("404", "XXX") # Vacina 404
 
-                # ESTRATÉGIA DE BLOCOS: Divide pelo padrão "Código ML:"
+                # Estratégia de Blocos
                 text_marked = re.sub(r'(Código\s*ML[:\s])', r'||BLOCK||\1', text, flags=re.IGNORECASE)
                 blocks = text_marked.split('||BLOCK||')
 
@@ -145,19 +147,14 @@ def extrair_dados_pdf_ml(pdf_bytes):
                     match_sku = regex_sku_finder.search(block)
                     if match_sku:
                         sku_raw = match_sku.group(1).strip()
-                        
-                        # Busca números no bloco isolado
                         numbers = regex_qtd_finder.findall(block)
                         
                         found_qty = None
                         for num_str in numbers:
                             try:
                                 val = int(num_str)
-                                # Verifica se o número não é parte do SKU
                                 num_in_sku = re.search(r'\d+', sku_raw)
-                                if num_in_sku and num_in_sku.group(0) == num_str:
-                                    continue 
-                                
+                                if num_in_sku and num_in_sku.group(0) == num_str: continue 
                                 if 0 < val < 10000:
                                     found_qty = val
                                     break 
@@ -387,13 +384,12 @@ with tab2:
                 )
                 if st.button(f"🛒 Enviar Selecionados ({emp})", key=f"bt_{emp}"): add_to_cart(emp)
 
-# --- TAB 3: CRUZAR PDF/EXCEL FULL (HÍBRIDO V37) ---
+# --- TAB 3: CRUZAR PDF/EXCEL FULL (HÍBRIDO V38) ---
 with tab3:
     st.header("🚛 Cruzar PDF ou Excel Full")
     st.info("💡 DICA: Para precisão total, use o arquivo convertido em Excel ou CSV!")
     
     emp_pdf = st.radio("Empresa do Envio:", ["ALIVVIA", "JCA"], horizontal=True, key="emp_pdf_full")
-    # Aceita todos os formatos agora
     file_full = st.file_uploader("Upload PDF ou Excel/CSV de Instruções", type=["pdf", "xlsx", "csv"], key="full_upload_tab3")
     
     df_res = st.session_state.get(f"resultado_{emp_pdf}")
@@ -413,7 +409,7 @@ with tab3:
                 df_bruto = extrair_dados_excel_ml(file_full)
             
             if df_bruto.empty:
-                st.error("Não consegui ler itens. Se for Excel, garanta que tem as colunas 'PRODUTO' e 'UNIDADES'.")
+                st.error("Não consegui ler itens.")
             else:
                 # 1. Fuzzy Match
                 df_mapeado = map_broken_skus(df_bruto, st.session_state.catalogo_df)
