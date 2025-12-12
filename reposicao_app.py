@@ -43,6 +43,7 @@ def extrair_dados_pdf_ml(pdf_bytes):
     """
     data = []
     # Regex para buscar SKUs (letras, números, hífens, barras)
+    # A busca é case-insensitive e captura SKUs com hífen
     regex_sku = re.compile(r'SKU:?\s*([\w\-\/]+)', re.IGNORECASE)
     # Regex para buscar a quantidade (números inteiros de 1 a 4 dígitos)
     regex_qtd = re.compile(r'\b(\d{1,4})\b') 
@@ -58,7 +59,7 @@ def extrair_dados_pdf_ml(pdf_bytes):
                         col_produto = str(row[0]).strip() if row[0] is not None else ""
                         col_qtd = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
                         
-                        # Limpa quebras de linha/espaços múltiplos para normalizar o texto
+                        # 🛑 CORREÇÃO CRÍTICA: Limpa quebras de linha e múltiplos espaços para remontar SKUs quebrados
                         col_produto_clean = re.sub(r'[\n\r]+', ' ', col_produto).strip()
                         col_qtd_clean = re.sub(r'[\n\r]+', ' ', col_qtd).strip()
                         
@@ -66,7 +67,7 @@ def extrair_dados_pdf_ml(pdf_bytes):
                         skus_encontrados = regex_sku.findall(col_produto_clean)
                         qtds_encontradas = regex_qtd.findall(col_qtd_clean)
                         
-                        # 2. Tenta parear (situação ideal)
+                        # 2. Tenta parear (situação ideal: número de SKUs coincide com QTDs)
                         if skus_encontrados and len(skus_encontrados) == len(qtds_encontradas):
                             for sku, qty_str in zip(skus_encontrados, qtds_encontradas):
                                 try:
@@ -76,14 +77,13 @@ def extrair_dados_pdf_ml(pdf_bytes):
                                 except ValueError:
                                     pass
                         
-                        # 3. Fallback/Complemento: Se o pareamento falhou ou o número é diferente, busca em toda a linha do produto
+                        # 3. Fallback/Complemento (para SKUs onde a QTD está na célula errada ou o pareamento falhou)
                         elif col_produto_clean:
-                            # Busca o SKU e a QTD em qualquer lugar da célula (para SKUs como as regatas)
                             match_sku = regex_sku.search(col_produto_clean)
                             if match_sku:
                                 sku = match_sku.group(1)
                                 
-                                # Tenta buscar a QTD na coluna de QTD ou na própria célula de produto (se QTD estiver vazia)
+                                # Procura a QTD na coluna de QTD ou na própria célula de produto
                                 source_text = col_qtd_clean if col_qtd_clean else col_produto_clean
                                 
                                 # Busca a primeira quantidade válida na fonte de texto
@@ -92,15 +92,15 @@ def extrair_dados_pdf_ml(pdf_bytes):
                                     try:
                                         qty = int(match_qty.group(1))
                                         if qty > 0:
+                                            # Adiciona se ainda não foi adicionado pelo pareamento (garantia de inclusão)
                                             data.append({"SKU": norm_sku(sku), "Qtd_Envio": qty})
                                     except ValueError:
                                         pass
                 
-                # Fallback FINAL: Varre todo o texto da página para garantir que nada foi perdido (para SKUs totalmente fora do padrão de tabela)
+                # Fallback FINAL: Varre todo o texto da página (garantia máxima)
                 text = page.extract_text()
                 if text:
                     for line in text.split('\n'):
-                        # Regex que busca SKU seguido por qualquer texto (inclusive quebra de linha) e então a QTD
                         match_full = re.search(r'SKU:?\s*([\w\-\/]+).*?(\b\d{1,4}\b)', line, re.IGNORECASE)
                         if match_full:
                             sku = match_full.group(1)
@@ -112,7 +112,7 @@ def extrair_dados_pdf_ml(pdf_bytes):
                             except ValueError:
                                 pass
                                 
-            # Final: Agrupa somando quantidades (essencial para eliminar duplicação do fallback e somar kits explodidos)
+            # Final: Agrupa somando quantidades (essencial para eliminar duplicação e somar kits)
             df_final = pd.DataFrame(data).drop_duplicates()
             df_final = df_final.groupby("SKU", as_index=False)["Qtd_Envio"].sum()
             return df_final
