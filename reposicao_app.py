@@ -22,7 +22,6 @@ from src.orders_db import gerar_numero_oc, salvar_pedido, listar_pedidos, atuali
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
 # ===================== FUNÇÕES DE CAMINHO DE CACHE =====================
-# É CRÍTICO que esta função exista para gerenciar o timestamp
 def get_local_timestamp_path(empresa: str, tipo: str) -> str:
     """Retorna o caminho local para o arquivo de timestamp."""
     # Assume que STORAGE_DIR está definido em src.config
@@ -273,15 +272,24 @@ with tab1:
             for ft in ["FULL", "VENDAS", "ESTOQUE"]:
                 curr_state = st.session_state[emp][ft]
                 
-                f = st.file_uploader(f"Upload {ft}", type=["xlsx", "csv", "pdf"], key=f"u_{emp}_{ft}")
+                # CRÍTICO: Incluir PDF como tipo para o Full
+                file_types = ["xlsx", "csv"]
+                if ft == "FULL": file_types.append("pdf")
+                    
+                f = st.file_uploader(f"Upload {ft}", type=file_types, key=f"u_{emp}_{ft}")
                 
-                if f:
+                # Variáveis de Estado de Upload
+                uploaded_flag_key = f"uploaded_{emp}_{ft}"
+                
+                # 🛑 CORREÇÃO CRÍTICA DO LOOP INFINITO
+                if f and f.name != curr_state.get("name") and f.getvalue() != curr_state.get("bytes"):
                     # Lógica de Sobrescrita e Timestamp
                     time_path = get_local_timestamp_path(emp, ft)
                     
                     # Usa a variável 'f' para obter o nome e conteúdo AGORA
                     file_bytes = f.getvalue()
                     file_name = f.name
+                    # CRÍTICO: Usamos UTC para evitar problemas de fuso e exibimos em formato local
                     timestamp_str = dt.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
                     # 1. Salva o conteúdo do arquivo (sobrescreve o .bin)
@@ -295,13 +303,14 @@ with tab1:
                     st.session_state[emp][ft] = {"name": file_name, "bytes": file_bytes, "timestamp": timestamp_str}
                     st.toast("✅ Arquivo Salvo e Sobrescrito!")
                     
-                    # 🛑 CRÍTICO: REMOVE st.rerun() e time.sleep(1) para evitar loop e piscadas
-                    
-                # A lógica de exibição está correta (agora que o flow control foi corrigido)
+                    # Força um re-render limpo
+                    st.rerun()
+
+                # A lógica de exibição está correta
                 if curr_state["name"]:
                     st.caption(f"**Nome:** {curr_state['name']}")
-                    # CRÍTICO: O timestamp deve vir do estado da sessão
-                    st.caption(f"**Data Upload:** {curr_state['timestamp'] if curr_state['timestamp'] else 'Carregado de Versão Antiga'}")
+                    # CRÍTICO: Exibir o timestamp do estado
+                    st.caption(f"**Data Upload:** {curr_state['timestamp'] if curr_state['timestamp'] else 'Carregado (sem data)'}")
                     
                     if st.button("🧹 Limpar Cache", key=f"clean_{emp}_{ft}"):
                         clear_file_cache(emp, ft)
