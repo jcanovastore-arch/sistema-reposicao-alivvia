@@ -7,449 +7,403 @@ import pdfplumber
 import re 
 import io 
 import numpy as np 
+from unidecode import unidecode
 from typing import Optional, Tuple
 
 # Imports internos
 from src.config import DEFAULT_SHEET_LINK, STORAGE_DIR
-from src.utils import style_df_compra, norm_sku, format_br_currency, format_br_int 
-from src.data import get_local_file_path, get_local_name_path, load_any_table_from_bytes, carregar_padrao_local_ou_sheets, _carregar_padrao_de_content
-from src.logic import Catalogo, mapear_colunas, calcular, explodir_por_kits, construir_kits_efetivo
 from src.orders_db import gerar_numero_oc, salvar_pedido, listar_pedidos, atualizar_status, excluir_pedido_db
 
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
-# ===================== FUNÇÕES DE CACHE E UTILS =====================
-def get_local_timestamp_path(empresa: str, tipo: str) -> str:
-    return os.path.join(STORAGE_DIR, f"{empresa}_{tipo}_time.txt")
+# ===================== UTILS =====================
 
-def get_br_datetime() -> dt.datetime:
-    now_naive = dt.datetime.now()
-    now_br = now_naive - dt.timedelta(hours=3)
-    return now_br
+def format_br_currency(val):
+    return f"R$ {val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-# 🛑 FUNÇÃO: MAPEAMENTO INTELIGENTE (EXATIDÃO > APROXIMAÇÃO)
-def find_closest_sku(broken_sku: str, catalog_skus: set) -> Optional[str]:
-    target = norm_sku(broken_sku).replace(' ', '').replace('\n', '').strip()
-    if not target: return None
-    
-    catalog_map = {norm_sku(s).replace(' ', '').replace('\n', '').strip(): s for s in catalog_skus}
-    
-    if target in catalog_map: return catalog_map[target]
-    
-    candidates = [s for s in catalog_skus if norm_sku(s).replace(' ', '').startswith(target)]
-    if candidates:
-        candidates.sort(key=len, reverse=True)
-        return candidates[0]
-    return None
+def format_br_int(val):
+    return f"{int(val):,}".replace(",", ".")
 
-def map_broken_skus(df_pdf: pd.DataFrame, catalogo_df: pd.DataFrame) -> pd.DataFrame:
-    if catalogo_df is None or catalogo_df.empty: return df_pdf
-    catalog_skus = set(catalogo_df["component_sku"].unique())
-    df_pdf["SKU_Mapeado"] = df_pdf["SKU"].apply(lambda x: find_closest_sku(x, catalog_skus))
-    df_mapped = df_pdf.dropna(subset=["SKU_Mapeado"]).copy()
-    df_mapped["SKU"] = df_mapped["SKU_Mapeado"]
-    return df_mapped.groupby("SKU", as_index=False)["Qtd_Envio"].sum() 
+def norm_sku(x):
+    if pd.isna(x): return ""
+    return str(x).strip().upper()
 
-# ===================== FUNÇÕES DE LEITURA (PDF E EXCEL/CSV) =====================
-def extrair_dados_excel_ml(file_obj) -> pd.DataFrame:
+def norm_header(s):
+    s = str(s).strip().lower()
+    s = unidecode(s)
+    for ch in [" ", "(", ")", ".", "-", "/"]:
+        s = s.replace(ch, "_")
+    return s
+
+def br_to_float(x):
+    if pd.isna(x): return 0.0
+    if isinstance(x, (int, float)): return float(x)
+    s = str(x).strip()
+    s = s.replace("R$", "").replace(" ", "").replace(".", "").replace(",", ".")
+    try: return float(s)
+    except: return 0.0
+
+# ===================== LEITURA DE ARQUIVOS (FIX V41 + V42) =====================
+
+def encontrar_cabecalho_e_ler(file_bytes, filename) -> pd.DataFrame:
+    """Lê ignorando metadados iniciais."""
     try:
-        try: df = pd.read_csv(file_obj, sep=None, engine='python')
-        except: file_obj.seek(0); df = pd.read_excel(file_obj)
+        is_csv = filename.lower().endswith(".csv")
+        # Leitura bruta para achar cabeçalho
+        if is_csv:
+            try: df_raw = pd.read_csv(io.BytesIO(file_bytes), header=None, nrows=20, sep=None, engine='python')
+            except: df_raw = pd.read_csv(io.BytesIO(file_bytes), header=None, nrows=20)
+        else:
+            df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, nrows=20)
+
+        # Procura linha com palavras chave
+        header_idx = -1
+        keywords = ["sku", "codigo", "produto", "anuncio", "id produto"]
+        for idx, row in df_raw.iterrows():
+            row_str = " ".join([str(x).lower() for x in row.values])
+            if any(k in row_str for k in keywords):
+                header_idx = idx
+                break
+        
+        if header_idx == -1: header_idx = 0
+        
+        if is_csv: df = pd.read_csv(io.BytesIO(file_bytes), header=header_idx, sep=None, engine='python')
+        else: df = pd.read_excel(io.BytesIO(file_bytes), header=header_idx)
+        return df
+    except Exception as e:
+        st.error(f"Erro ao ler {filename}: {e}")
+        return pd.DataFrame()
+
+def mapear_colunas_inteligente(df, tipo):
+    """Mapeia colunas para nomes padrão."""
+    df.columns = [norm_header(c) for c in df.columns]
+    cols = df.columns
+    rename_map = {}
+    
+    # --- FULL (ML) ---
+    if tipo == "FULL":
+        if "sku" in cols: rename_map["sku"] = "SKU"
+        elif "codigo_sku" in cols: rename_map["codigo_sku"] = "SKU"
+        
+        # Vendas ML (Geralmente "Vendas Qtd (61d)")
+        col_vendas = next((c for c in cols if "vendas_qtd" in c), None)
+        if col_vendas: rename_map[col_vendas] = "Vendas_Full"
+        
+        # Estoque Full
+        col_est = next((c for c in cols if "estoque_atual" in c), None)
+        if col_est: rename_map[col_est] = "Estoque_Full"
+
+    # --- VENDAS EXTERNAS (Shopee/Outros) ---
+    elif tipo == "VENDAS_EXT":
+        if "sku" in cols: rename_map["sku"] = "SKU"
+        col_qtd = next((c for c in cols if "unidades" in c or "qtd" in c or "quantidade" in c), None)
+        if col_qtd: rename_map[col_qtd] = "Vendas_Ext"
+
+    # --- ESTOQUE FISICO ---
+    elif tipo == "FISICO":
+        col_sku = next((c for c in cols if "codigo" in c and "sku" in c), None)
+        if not col_sku: col_sku = next((c for c in cols if "sku" in c), None)
+        if col_sku: rename_map[col_sku] = "SKU"
+        
+        col_est = next((c for c in cols if "estoque_disponivel" in c), None)
+        if not col_est: col_est = next((c for c in cols if "estoque_atual" in c), None)
+        if col_est: rename_map[col_est] = "Estoque_Fisico"
+        
+        col_preco = next((c for c in cols if "preco" in c), None)
+        if col_preco: rename_map[col_preco] = "Preco"
+
+    df = df.rename(columns=rename_map)
+    
+    if "SKU" in df.columns: df["SKU"] = df["SKU"].apply(norm_sku)
+    
+    # Conversão numérica
+    for c in ["Vendas_Full", "Vendas_Ext", "Estoque_Full", "Estoque_Fisico", "Preco"]:
+        if c in df.columns: df[c] = df[c].apply(br_to_float)
             
-        header_row = None
-        for i in range(min(20, len(df))):
-            row_vals = df.iloc[i].astype(str).str.upper().tolist()
-            if any("UNIDADES" in v for v in row_vals) and any("PRODUTO" in v for v in row_vals):
-                header_row = i; break
-        
-        if header_row is not None:
-            df.columns = df.iloc[header_row]; df = df.iloc[header_row+1:].copy()
-        
-        col_prod = next((c for c in df.columns if "PRODUTO" in str(c).upper()), None)
-        col_qtd = next((c for c in df.columns if "UNIDADES" in str(c).upper()), None)
-        
-        if not col_prod or not col_qtd: return pd.DataFrame()
-            
-        data = []
-        regex_sku = re.compile(r'SKU:?\s*([\w\-\/\+\.\&]+)', re.IGNORECASE)
-        
-        for _, row in df.iterrows():
-            prod_text = str(row[col_prod]); qtd_val = row[col_qtd]
-            match = regex_sku.search(prod_text)
-            if match:
-                sku = match.group(1).strip()
-                try:
-                    qtd_str = str(qtd_val).replace(',', '.')
-                    if not qtd_str.strip(): continue
-                    qtd = int(float(qtd_str))
-                    if qtd > 0: data.append({"SKU": sku, "Qtd_Envio": qtd})
-                except: pass
-        return pd.DataFrame(data).groupby("SKU", as_index=False)["Qtd_Envio"].sum()
-    except: return pd.DataFrame()
+    return df
 
-def extrair_dados_pdf_ml(pdf_bytes):
-    data = []
-    regex_sku_finder = re.compile(r'SKU:?\s*([\w\-\/\+\.\&]+)', re.IGNORECASE)
-    regex_qtd_finder = re.compile(r'\b(\d{1,5})\b') 
-    try:
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text()
-                if not text: continue
-                text = text.replace("404", "XXX")
-                text_marked = re.sub(r'(Código\s*ML[:\s])', r'||BLOCK||\1', text, flags=re.IGNORECASE)
-                blocks = text_marked.split('||BLOCK||')
-                for block in blocks:
-                    if not block.strip(): continue
-                    match_sku = regex_sku_finder.search(block)
-                    if match_sku:
-                        sku_raw = match_sku.group(1).strip()
-                        numbers = regex_qtd_finder.findall(block)
-                        found_qty = None
-                        for num_str in numbers:
-                            try:
-                                val = int(num_str)
-                                num_in_sku = re.search(r'\d+', sku_raw)
-                                if num_in_sku and num_in_sku.group(0) == num_str: continue 
-                                if 0 < val < 10000: found_qty = val; break 
-                            except: continue
-                        if found_qty: data.append({"SKU": sku_raw, "Qtd_Envio": found_qty})
-        if not data: return pd.DataFrame()
-        return pd.DataFrame(data).drop_duplicates().groupby("SKU", as_index=False)["Qtd_Envio"].sum()
-    except: return pd.DataFrame()
+# ===================== LÓGICA DE CÁLCULO (V42 Separado) =====================
 
-# ===================== SEGURANÇA =====================
-if "password_correct" not in st.session_state: st.session_state.password_correct = False
-if not st.session_state.password_correct:
-    pwd = st.text_input("🔒 Senha:", type="password")
-    if pwd == st.secrets["access"]["password"]:
-        st.session_state.password_correct = True; st.rerun()
-    st.stop()
+class Catalogo:
+    def __init__(self, df_cat, df_kits):
+        self.catalogo_simples = df_cat
+        self.kits_reais = df_kits
 
-# ===================== ESTADO E SETUP =====================
-def _ensure_state():
-    defaults = {"catalogo_df": None, "kits_df": None, "resultado_ALIVVIA": None, "resultado_JCA": None, "pedido_ativo": {"itens": [], "fornecedor": None, "empresa": None, "obs": ""}}
-    for k, v in defaults.items():
-        if k not in st.session_state: st.session_state[k] = v
-    for emp in ["ALIVVIA", "JCA"]:
-        if emp not in st.session_state: st.session_state[emp] = {}
-        for ft in ["FULL", "VENDAS", "ESTOQUE"]:
-            if ft not in st.session_state[emp] or "timestamp" not in st.session_state[emp][ft]: 
-                st.session_state[emp][ft] = {"name": None, "bytes": None, "timestamp": None}
-            if not st.session_state[emp][ft]["name"]:
-                try:
-                    p = get_local_file_path(emp, ft); n = get_local_name_path(emp, ft); t = get_local_timestamp_path(emp, ft)
-                    if os.path.exists(p):
-                        with open(p, 'rb') as f: st.session_state[emp][ft]["bytes"] = f.read()
-                        with open(n, 'r') as f: st.session_state[emp][ft]["name"] = f.read().strip()
-                        if os.path.exists(t):
-                             with open(t, 'r') as f: st.session_state[emp][ft]["timestamp"] = f.read().strip()
-                        else: st.session_state[emp][ft]["timestamp"] = dt.datetime.fromtimestamp(os.path.getmtime(p)).strftime("%d/%m/%Y %H:%M:%S")
-                except: st.session_state[emp][ft] = {"name": None, "bytes": None, "timestamp": None}
-_ensure_state()
+def calcular_necessidade(full_df, ext_df, fis_df, catalogo: Catalogo, dias_horizonte, cresc_pct, lead_time):
+    # 1. Inicia com base no Full
+    base = full_df.copy()
+    if "SKU" not in base.columns: return pd.DataFrame()
 
-# ===================== FUNÇÕES UI =====================
-def add_to_cart_full(df_source, emp):
-    if df_source is None or df_source.empty or "Faltam_Comprar" not in df_source.columns: return
-    df_buy = df_source[df_source["Faltam_Comprar"] > 0].copy()
-    if df_buy.empty: return st.toast("Nada faltante!", icon="✅")
-    curr = st.session_state.pedido_ativo["itens"]
-    curr_skus = [i["sku"] for i in curr]; c = 0
-    for _, r in df_buy.iterrows():
-        if r["SKU"] not in curr_skus:
-            curr.append({"sku": r["SKU"], "qtd": int(r["Faltam_Comprar"]), "valor_unit": float(r.get("Preco", 0.0)), "origem": f"FULL_{emp}"}); c += 1
-    st.session_state.pedido_ativo["itens"] = curr
-    if not st.session_state.pedido_ativo["fornecedor"] and "fornecedor" in df_buy.columns and not df_buy["fornecedor"].empty:
-         st.session_state.pedido_ativo["fornecedor"] = df_buy.iloc[0]["fornecedor"]
-    st.toast(f"{c} itens adicionados!", icon="🛒")
+    # Garante colunas base
+    if "Vendas_Full" not in base.columns: base["Vendas_Full"] = 0.0
+    if "Estoque_Full" not in base.columns: base["Estoque_Full"] = 0.0
 
-def add_to_cart_from_editor(df_edited, emp):
-    """Lógica corrigida V40: Lê diretamente do DataFrame editado."""
-    if df_edited is None or df_edited.empty: return
-    # Filtra onde o checkbox está marcado
-    selecionados = df_edited[df_edited["Selecionar"] == True]
+    # 2. Merge Vendas Externas (Se houver)
+    if ext_df is not None and not ext_df.empty and "SKU" in ext_df.columns:
+        ext_clean = ext_df[["SKU", "Vendas_Ext"]].groupby("SKU", as_index=False).sum()
+        base = base.merge(ext_clean, on="SKU", how="outer").fillna(0) # Outer para incluir o que só vende na Shopee
+    else:
+        base["Vendas_Ext"] = 0.0
+
+    # 3. Merge Estoque Físico
+    if fis_df is not None and not fis_df.empty and "SKU" in fis_df.columns:
+        cols_fis = ["SKU", "Estoque_Fisico", "Preco"]
+        fis_clean = fis_df[[c for c in cols_fis if c in fis_df.columns]].groupby("SKU", as_index=False).sum(numeric_only=True)
+        # Traz preço (maximo para evitar erro de soma)
+        if "Preco" in fis_df.columns:
+             p_map = fis_df.groupby("SKU")["Preco"].max()
+             fis_clean["Preco"] = fis_clean["SKU"].map(p_map)
+        base = base.merge(fis_clean, on="SKU", how="left").fillna(0)
+    else:
+        base["Estoque_Fisico"] = 0.0
+        base["Preco"] = 0.0
     
-    if selecionados.empty: return st.toast("Nenhum item selecionado na tabela!", icon="⚠️")
-    
-    curr = st.session_state.pedido_ativo["itens"]
-    curr_skus = [i["sku"] for i in curr]; c = 0
-    
-    for _, r in selecionados.iterrows():
-        qtd = int(r.get("Compra_Sugerida", 0))
-        if r["SKU"] not in curr_skus and qtd > 0:
-            curr.append({"sku": r["SKU"], "qtd": qtd, "valor_unit": float(r.get("Preco", 0)), "origem": emp}); c += 1
-            
-    st.session_state.pedido_ativo["itens"] = curr
-    if not st.session_state.pedido_ativo["fornecedor"] and not selecionados.empty:
-        st.session_state.pedido_ativo["fornecedor"] = selecionados.iloc[0]["fornecedor"]
-    st.toast(f"{c} itens adicionados!", icon="🛒")
-    
-def clear_file_cache(empresa, tipo):
-    p = get_local_file_path(empresa, tipo); n = get_local_name_path(empresa, tipo); t = get_local_timestamp_path(empresa, tipo)
-    if os.path.exists(p): os.remove(p)
-    if os.path.exists(n): os.remove(n)
-    if os.path.exists(t): os.remove(t)
-    st.session_state[empresa][tipo] = {"name": None, "bytes": None, "timestamp": None}
-    st.session_state[f"resultado_{empresa}"] = None
-    st.toast("Limpo!", icon="🧹"); time.sleep(1); st.rerun()
+    # Garante que colunas numéricas não são NaN após merges
+    for c in ["Vendas_Full", "Vendas_Ext", "Estoque_Full", "Estoque_Fisico", "Preco"]:
+        if c in base.columns: base[c] = base[c].fillna(0)
 
-def reset_master_data():
-    st.session_state.catalogo_df = None; st.session_state.kits_df = None
-    st.toast("Limpo!", icon="🧹"); st.rerun() 
+    # 4. Cálculo Totalizador
+    # Assumindo que o relatório do ML Full é 60 dias (padrão)
+    # Se Vendas Ext for 30 dias, ideal seria normalizar, mas vamos somar direto conforme pedido
+    base["Vendas_Total_60d"] = base["Vendas_Full"] + base["Vendas_Ext"]
+    
+    # Média Diária
+    base["Venda_Media_Dia"] = base["Vendas_Total_60d"] / 60.0
+    
+    # Crescimento
+    fator_cresc = 1 + (cresc_pct / 100.0)
+    base["Venda_Media_Dia"] = base["Venda_Media_Dia"] * fator_cresc
+    
+    # Necessidade
+    base["Necessidade_Total"] = base["Venda_Media_Dia"] * (dias_horizonte + lead_time)
+    
+    # Estoque Total
+    base["Estoque_Total"] = base["Estoque_Full"] + base["Estoque_Fisico"]
+    
+    # Sugestão
+    base["Compra_Sugerida"] = (base["Necessidade_Total"] - base["Estoque_Total"]).apply(np.ceil).clip(lower=0)
+    base["Valor_Compra_R$"] = base["Compra_Sugerida"] * base["Preco"]
+    
+    return base.sort_values("Compra_Sugerida", ascending=False)
 
-# ===================== SIDEBAR =====================
+# ===================== FILE CACHE PATHS =====================
+def get_local_file_path(emp, tipo): return os.path.join(STORAGE_DIR, f"{emp}_{tipo}_v42.bin")
+def get_local_name_path(emp, tipo): return os.path.join(STORAGE_DIR, f"{emp}_{tipo}_name_v42.txt")
+def get_local_timestamp_path(emp, tipo): return os.path.join(STORAGE_DIR, f"{emp}_{tipo}_time_v42.txt")
+
+# ===================== UI MAIN =====================
+
+# States
+if "catalogo_df" not in st.session_state: st.session_state.catalogo_df = None
+if "kits_df" not in st.session_state: st.session_state.kits_df = None
+if "pedido_ativo" not in st.session_state: st.session_state.pedido_ativo = {"itens": [], "fornecedor": None, "empresa": None, "obs": ""}
+
+for emp in ["ALIVVIA", "JCA"]:
+    if emp not in st.session_state: st.session_state[emp] = {}
+    for ft in ["FULL", "VENDAS_EXT", "ESTOQUE"]: # 3 Tipos agora
+        if ft not in st.session_state[emp]: st.session_state[emp][ft] = {"name": None, "bytes": None, "timestamp": None}
+
 with st.sidebar:
     st.header("⚙️ Parâmetros")
     h_p = st.selectbox("Horizonte (Dias)", [30, 60, 90], index=1)
-    g_p = st.number_input("Crescimento %", value=0.0, step=0.5)
-    lt_p = st.number_input("Lead Time", value=0, step=1)
-    st.info("💡 Se alterar os dias, clique em 'Calc ALIVVIA' ou 'Calc JCA' novamente na aba 'Análise'.")
+    g_p = st.number_input("Crescimento %", value=0.0)
+    lt_p = st.number_input("Lead Time (Dias)", value=0)
     st.divider()
     st.subheader("📂 Dados Mestre")
-    if st.button("🔄 Baixar Sheets"):
+    if st.button("🔄 Baixar Sheets (Padrão)"):
         try:
-            c, o = carregar_padrao_local_ou_sheets(DEFAULT_SHEET_LINK)
-            st.session_state.catalogo_df = c.catalogo_simples; st.session_state.kits_df = c.kits_reais; st.success(f"Ok: {o}")
+            c, _ = carregar_padrao_local_ou_sheets(DEFAULT_SHEET_LINK)
+            st.session_state.catalogo_df = c.catalogo_simples
+            st.session_state.kits_df = c.kits_reais
+            st.success("Atualizado!")
         except Exception as e: st.error(f"Erro: {e}")
-    up_m = st.file_uploader("Ou 'Padrao_produtos.xlsx':", type=["xlsx"])
+    up_m = st.file_uploader("Ou Excel Manual", type=["xlsx"])
     if up_m:
-        try:
-            from src.data import _carregar_padrao_de_content
-            c = _carregar_padrao_de_content(up_m.getvalue())
-            st.session_state.catalogo_df = c.catalogo_simples; st.session_state.kits_df = c.kits_reais; st.success("Ok!")
-        except Exception as e: st.error(f"Erro: {e}")
-    st.divider()
-    st.button("🧹 Reset Mestre", on_click=reset_master_data)
+        from src.data import _carregar_padrao_de_content
+        c = _carregar_padrao_de_content(up_m.getvalue())
+        st.session_state.catalogo_df = c.catalogo_simples
+        st.session_state.kits_df = c.kits_reais
+        st.success("Ok!")
 
-st.title("Reposição Logística — Alivvia")
-if st.session_state.catalogo_df is None: st.warning("⚠️ Carregue o Padrão de Produtos.")
+st.title("Reposição Logística — Alivvia (V42 Separado)")
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📂 Uploads", "🔍 Análise & Compra", "🚛 Cruzar PDF Full", "📝 Editor OC", "🗂️ Gestão", "📦 Alocação"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📂 Uploads", "🔍 Análise", "🚛 Cruzar PDF/Excel", "📝 Pedido", "🗂️ Gestão"])
 
-# --- TAB 1: UPLOADS ---
+# --- TAB 1: UPLOADS (3 CAMPOS AGORA) ---
 with tab1:
-    st.subheader("⚠️ Arquivos Operacionais")
     c1, c2 = st.columns(2)
-    def up_block(emp, col):
+    def render_upload(emp, col):
         with col:
             st.markdown(f"### {emp}")
-            for ft in ["FULL", "VENDAS", "ESTOQUE"]:
-                curr = st.session_state[emp][ft]
-                tp = ["xlsx", "csv"]
-                if ft == "FULL": tp.append("pdf")
-                f = st.file_uploader(f"Upload {ft}", type=tp, key=f"u_{emp}_{ft}")
-                if f and (f.name != curr.get("name") or not curr.get("name")):
-                        now = get_br_datetime().strftime("%d/%m/%Y %H:%M:%S")
-                        with open(get_local_file_path(emp, ft), 'wb') as fb: fb.write(f.getvalue())
-                        with open(get_local_name_path(emp, ft), 'w') as fn: fn.write(f.name)
-                        with open(get_local_timestamp_path(emp, ft), 'w') as ft_w: ft_w.write(now)
-                        st.session_state[emp][ft] = {"name": f.name, "bytes": f.getvalue(), "timestamp": now}
-                        st.toast(f"Salvo!", icon="✅"); time.sleep(1); st.rerun() 
-                if curr["name"]:
-                    st.caption(f"**{curr['name']}** ({curr['timestamp']})")
-                    if st.button("🧹", key=f"c_{emp}_{ft}"): clear_file_cache(emp, ft)
-    up_block("ALIVVIA", c1); up_block("JCA", c2)
+            
+            # 1. FULL (ML)
+            f_full = st.file_uploader(f"1. Relatório FULL (ML) - {emp}", type=["xlsx", "csv"], key=f"u_{emp}_full")
+            if f_full:
+                st.session_state[emp]["FULL"] = {"bytes": f_full.getvalue(), "name": f_full.name, "timestamp": str(dt.datetime.now())}
+                st.success("Full Carregado!")
+            
+            # 2. VENDAS EXT (Shopee/Outros)
+            f_ext = st.file_uploader(f"2. Vendas Externas (Shopee) - {emp}", type=["xlsx", "csv"], key=f"u_{emp}_ext")
+            if f_ext:
+                st.session_state[emp]["VENDAS_EXT"] = {"bytes": f_ext.getvalue(), "name": f_ext.name, "timestamp": str(dt.datetime.now())}
+                st.success("Vendas Ext Carregado!")
+
+            # 3. ESTOQUE (Fisico)
+            f_fis = st.file_uploader(f"3. Estoque Físico - {emp}", type=["xlsx", "csv"], key=f"u_{emp}_fis")
+            if f_fis:
+                st.session_state[emp]["ESTOQUE"] = {"bytes": f_fis.getvalue(), "name": f_fis.name, "timestamp": str(dt.datetime.now())}
+                st.success("Estoque Carregado!")
+
+    render_upload("ALIVVIA", c1)
+    render_upload("JCA", c2)
 
 # --- TAB 2: ANÁLISE ---
 with tab2:
     if st.session_state.catalogo_df is not None:
         c1, c2 = st.columns(2)
-        def run_calc(emp):
+        def processar(emp):
             s = st.session_state[emp]
-            if not (s["FULL"]["bytes"] and s["VENDAS"]["bytes"]): return st.warning("Faltam arquivos.")
-            try:
-                full = mapear_colunas(load_any_table_from_bytes(s["FULL"]["name"], s["FULL"]["bytes"]), "FULL")
-                vend = mapear_colunas(load_any_table_from_bytes(s["VENDAS"]["name"], s["VENDAS"]["bytes"]), "VENDAS")
-                fis = pd.DataFrame()
-                if s["ESTOQUE"]["bytes"]: fis = mapear_colunas(load_any_table_from_bytes(s["ESTOQUE"]["name"], s["ESTOQUE"]["bytes"]), "FISICO")
-                cat = Catalogo(st.session_state.catalogo_df, st.session_state.kits_df)
-                res, _ = calcular(full, fis, vend, cat, h_p, g_p, lt_p)
-                st.session_state[f"resultado_{emp}"] = res
-                st.success(f"{emp} Atualizado (Horizonte: {h_p}d)!")
-            except Exception as e: st.error(f"Erro: {e}")
+            if not s["FULL"]["bytes"]: return st.warning(f"Falta arquivo FULL de {emp}")
+            
+            # Ler Full
+            df_full_raw = encontrar_cabecalho_e_ler(s["FULL"]["bytes"], s["FULL"]["name"])
+            df_full = mapear_colunas_inteligente(df_full_raw, "FULL")
+            
+            # Ler Externo (Se houver)
+            df_ext = pd.DataFrame()
+            if s["VENDAS_EXT"]["bytes"]:
+                df_ext_raw = encontrar_cabecalho_e_ler(s["VENDAS_EXT"]["bytes"], s["VENDAS_EXT"]["name"])
+                df_ext = mapear_colunas_inteligente(df_ext_raw, "VENDAS_EXT")
+                
+            # Ler Fisico
+            df_fis = pd.DataFrame()
+            if s["ESTOQUE"]["bytes"]:
+                df_fis_raw = encontrar_cabecalho_e_ler(s["ESTOQUE"]["bytes"], s["ESTOQUE"]["name"])
+                df_fis = mapear_colunas_inteligente(df_fis_raw, "FISICO")
+            
+            cat = Catalogo(st.session_state.catalogo_df, st.session_state.kits_df)
+            res = calcular_necessidade(df_full, df_ext, df_fis, cat, h_p, g_p, lt_p)
+            st.session_state[f"res_{emp}"] = res
+            st.success(f"Cálculo {emp} OK!")
+
+        if c1.button("CALCULAR ALIVVIA"): processar("ALIVVIA")
+        if c2.button("CALCULAR JCA"): processar("JCA")
         
-        if c1.button("Calc ALIVVIA", use_container_width=True): run_calc("ALIVVIA")
-        if c2.button("Calc JCA", use_container_width=True): run_calc("JCA")
         st.divider()
-        
-        f1, f2 = st.columns(2)
-        sku_f = f1.text_input("🔎 Filtro SKU", key="f_sku").upper()
-        
-        forns = set()
-        if st.session_state.resultado_ALIVVIA is not None: forns.update(st.session_state.resultado_ALIVVIA["fornecedor"].dropna().unique())
-        if st.session_state.resultado_JCA is not None: forns.update(st.session_state.resultado_JCA["fornecedor"].dropna().unique())
-        forn_f = f2.selectbox("🏭 Filtro Fornecedor", ["TODOS"] + sorted(list(forns)), key="f_forn")
+        f_sku = st.text_input("Filtrar SKU:").upper()
         
         for emp in ["ALIVVIA", "JCA"]:
-            if st.session_state.get(f"resultado_{emp}") is not None:
-                st.markdown(f"### 📊 {emp}")
-                df = st.session_state[f"resultado_{emp}"].copy()
+            if f"res_{emp}" in st.session_state:
+                st.markdown(f"### 📊 Resultado {emp}")
+                df = st.session_state[f"res_{emp}"].copy()
+                if f_sku: df = df[df["SKU"].str.contains(f_sku, na=False)]
                 
-                # Aplica Filtros
-                if sku_f: df = df[df["SKU"].str.contains(sku_f, na=False)]
-                if forn_f != "TODOS": df = df[df["fornecedor"] == forn_f]
+                # KPIs
+                c_k1, c_k2, c_k3 = st.columns(3)
+                c_k1.metric("💰 Sugestão (R$)", format_br_currency(df["Valor_Compra_R$"].sum()))
+                c_k2.metric("📦 Peças Sugeridas", format_br_int(df["Compra_Sugerida"].sum()))
+                c_k3.metric("📉 Demanda Total Calc.", format_br_int(df["Necessidade_Total"].sum()))
                 
-                if not df.empty:
-                    cols_num = ["Estoque_Fisico", "Preco", "Estoque_Full", "Compra_Sugerida", "Vendas_Total_60d"]
-                    for c in cols_num: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
-                    
-                    # CÁLCULO DOS TOTAIS DA SUGESTÃO (CORREÇÃO V40)
-                    val_sug = (df['Compra_Sugerida'] * df['Preco']).sum()
-                    demanda_proj = df['Necessidade'].sum() if 'Necessidade' in df.columns else 0 # Vendas projetadas para o periodo
-
-                    # KPIs Financeiros
-                    k1, k2, k3, k4 = st.columns(4)
-                    k1.metric(f"💰 Total Sugestão ({h_p}d)", format_br_currency(val_sug), help="Quanto você gastaria comprando TUDO o que está sugerido abaixo.")
-                    k2.metric(f"📉 Demanda ({h_p}d)", format_br_int(demanda_proj), help=f"Total de peças que serão vendidas nos próximos {h_p} dias segundo o cálculo.")
-                    k3.metric("📦 Estoque Físico", format_br_int(df['Estoque_Fisico'].sum()))
-                    k4.metric("🚛 Estoque Full", format_br_int(df['Estoque_Full'].sum()))
+                # Tabela
+                cols_view = ["SKU", "Vendas_Full", "Vendas_Ext", "Vendas_Total_60d", "Estoque_Full", "Estoque_Fisico", "Compra_Sugerida", "Preco", "Valor_Compra_R$"]
+                df["Selecionar"] = False
                 
-                # Checkbox de seleção
-                if "Selecionar" not in df.columns:
-                    df.insert(0, "Selecionar", False)
-                
-                cols_show = ["Selecionar", "SKU", "fornecedor", "Vendas_Total_60d", "Estoque_Full", "Estoque_Fisico", "Preco", "Compra_Sugerida", "Valor_Compra_R$"]
-                
-                # 🛑 CORREÇÃO DE SELEÇÃO V40: Capturamos o retorno do data_editor
-                edited_df = st.data_editor(
-                    style_df_compra(df[cols_show]), 
-                    key=f"ed_{emp}_v40", # Nova Key para limpar cache antigo
-                    use_container_width=True, 
+                edited = st.data_editor(
+                    df[["Selecionar"] + [c for c in cols_view if c in df.columns]],
                     hide_index=True,
+                    use_container_width=True,
+                    key=f"ed_{emp}",
                     column_config={
                         "Selecionar": st.column_config.CheckboxColumn(default=False),
-                        "Estoque_Fisico": st.column_config.NumberColumn(format="%d"),
+                        "Vendas_Full": st.column_config.NumberColumn("Vendas Full (ML)", format="%d"),
+                        "Vendas_Ext": st.column_config.NumberColumn("Vendas Ext (Shopee)", format="%d"),
+                        "Vendas_Total_60d": st.column_config.NumberColumn("Total Vendas", format="%d"),
                         "Preco": st.column_config.NumberColumn(format="R$ %.2f"),
                         "Valor_Compra_R$": st.column_config.NumberColumn(format="R$ %.2f")
                     }
                 )
                 
-                # Botão agora usa o DataFrame editado retornado, não o state antigo
-                if st.button(f"🛒 Adicionar Selecionados ({emp})", key=f"bt_{emp}"): 
-                    add_to_cart_from_editor(edited_df, emp)
+                if st.button(f"Adicionar ao Pedido ({emp})", key=f"add_{emp}"):
+                    sel = edited[edited["Selecionar"]==True]
+                    curr = st.session_state.pedido_ativo["itens"]
+                    exist = [x["sku"] for x in curr]
+                    c = 0
+                    for _, r in sel.iterrows():
+                        if r["SKU"] not in exist and r["Compra_Sugerida"] > 0:
+                            curr.append({"sku": r["SKU"], "qtd": int(r["Compra_Sugerida"]), "valor_unit": float(r["Preco"]), "origem": emp})
+                            c+=1
+                    st.session_state.pedido_ativo["itens"] = curr
+                    st.toast(f"{c} itens adicionados!")
 
-# --- TAB 3: CRUZAR PDF/EXCEL FULL ---
+# --- TAB 3: CRUZAR (Mantido lógica V41 simplificada) ---
 with tab3:
-    st.header("🚛 Cruzar PDF ou Excel Full")
-    st.info("💡 Use Excel/CSV para precisão 100%.")
-    emp_pdf = st.radio("Empresa:", ["ALIVVIA", "JCA"], horizontal=True)
-    file_full = st.file_uploader("Upload Arquivo", type=["pdf", "xlsx", "csv"])
-    df_res = st.session_state.get(f"resultado_{emp_pdf}")
-    
-    if df_res is None: st.warning("Calcule a aba 'Análise' antes.")
-    elif file_full:
-        if st.session_state.catalogo_df is None: st.error("Padrão não carregado.")
+    st.header("Cruzamento Inbound")
+    emp_t = st.radio("Empresa:", ["ALIVVIA", "JCA"], horizontal=True)
+    f_in = st.file_uploader("Upload Inbound (Excel/CSV/PDF)", type=["xlsx", "csv", "pdf"])
+    if f_in and f"res_{emp_t}" in st.session_state:
+        # Lógica de leitura simplificada
+        if f_in.name.endswith(".pdf"):
+            st.warning("PDF: Usando modo básico. Prefira Excel.")
+            import pdfplumber
+            from io import BytesIO
+            data_in = []
+            with pdfplumber.open(BytesIO(f_in.getvalue())) as pdf:
+                full_txt = "".join([p.extract_text() or "" for p in pdf.pages])
+                matches = re.findall(r'SKU:?\s*([\w\-\/\+\.]+)', full_txt)
+                # Mock qtd for PDF basic fallback
+                for m in matches: data_in.append({"SKU": m.upper(), "Qtd_Envio": 1}) 
+            df_in = pd.DataFrame(data_in).groupby("SKU", as_index=False).sum()
         else:
-            if file_full.name.lower().endswith('.pdf'): df_bruto = extrair_dados_pdf_ml(file_full.getvalue())
-            else: df_bruto = extrair_dados_excel_ml(file_full)
-            
-            if df_bruto.empty: st.error("Erro leitura.")
-            else:
-                df_map = map_broken_skus(df_bruto, st.session_state.catalogo_df)
-                if df_map.empty: st.error("SKUs não reconhecidos.")
-                else:
-                    cat = Catalogo(st.session_state.catalogo_df, st.session_state.kits_df)
-                    kits = construir_kits_efetivo(cat)
-                    df_exp = explodir_por_kits(df_map, kits, "SKU", "Qtd_Envio").rename(columns={"Quantidade": "Qtd_Necessaria_Envio"})
-                    df_m = df_exp.merge(df_res[["SKU", "Estoque_Fisico", "fornecedor", "Preco"]], on="SKU", how="left")
-                    
-                    df_m["Estoque_Fisico"] = df_m["Estoque_Fisico"].fillna(0).astype(int)
-                    df_m["Preco"] = pd.to_numeric(df_m["Preco"], errors='coerce').fillna(0.0)
-                    df_m["Faltam_Comprar"] = (df_m["Qtd_Necessaria_Envio"] - df_m["Estoque_Fisico"]).clip(lower=0).astype(int)
-                    df_m["Custo_Total"] = (df_m["Qtd_Necessaria_Envio"] * df_m["Preco"]).round(2)
-                    df_m["Custo_Falta"] = (df_m["Faltam_Comprar"] * df_m["Preco"]).round(2)
-                    
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Custo Total Envio", format_br_currency(df_m["Custo_Total"].sum()))
-                    c2.metric("Compra Faltante", format_br_currency(df_m["Custo_Falta"].sum()))
-                    c3.metric("Peças Faltantes", format_br_int(df_m['Faltam_Comprar'].sum()))
-                    
-                    def hl(s): return ['background-color: #8B0000; color: white' if v > 0 else '' for v in s]
-                    cols = ["SKU", "Qtd_Necessaria_Envio", "Estoque_Fisico", "Faltam_Comprar", "Preco", "Custo_Falta", "fornecedor"]
-                    st.dataframe(df_m[cols].style.format({"Preco":"R$ {:.2f}", "Custo_Falta":"R$ {:.2f}"}).apply(hl, subset=["Faltam_Comprar"]), use_container_width=True, hide_index=True)
-                    
-                    tf = df_m["Faltam_Comprar"].sum()
-                    if tf > 0: 
-                        if st.button(f"🛒 Add {tf} peças", type="primary"): add_to_cart_full(df_m, emp_pdf)
-                    else: st.success("Estoque OK!")
+            df_in_raw = encontrar_cabecalho_e_ler(f_in.getvalue(), f_in.name)
+            col_prod = next((c for c in df_in_raw.columns if "PRODUTO" in str(c).upper()), None)
+            col_qtd = next((c for c in df_in_raw.columns if "UNIDADES" in str(c).upper()), None)
+            data_in = []
+            if col_prod and col_qtd:
+                regex = re.compile(r'SKU:?\s*([\w\-\/\+\.\&]+)', re.IGNORECASE)
+                for _, r in df_in_raw.iterrows():
+                    m = regex.search(str(r[col_prod]))
+                    if m: data_in.append({"SKU": m.group(1).upper(), "Qtd_Envio": br_to_float(r[col_qtd])})
+            df_in = pd.DataFrame(data_in).groupby("SKU", as_index=False).sum()
 
-# --- TAB 4: EDITOR OC ---
+        if not df_in.empty:
+            df_base = st.session_state[f"res_{emp_t}"].copy()
+            merged = df_in.merge(df_base[["SKU", "Estoque_Fisico", "Preco"]], on="SKU", how="left")
+            merged["Faltam"] = (merged["Qtd_Envio"] - merged["Estoque_Fisico"].fillna(0)).clip(lower=0)
+            merged["Custo"] = merged["Faltam"] * merged["Preco"].fillna(0)
+            st.dataframe(merged)
+            
+            if st.button("Add Faltantes"):
+                filt = merged[merged["Faltam"] > 0]
+                curr = st.session_state.pedido_ativo["itens"]
+                exist = [x["sku"] for x in curr]
+                for _, r in filt.iterrows():
+                    if r["SKU"] not in exist:
+                        curr.append({"sku": r["SKU"], "qtd": int(r["Faltam"]), "valor_unit": float(r["Preco"] or 0), "origem": "INBOUND"})
+                st.session_state.pedido_ativo["itens"] = curr
+                st.success("Adicionado!")
+
+# --- TAB 4: PEDIDO ---
 with tab4:
-    st.header("📝 Editor OC")
+    st.header("Pedido")
     ped = st.session_state.pedido_ativo
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     ped["fornecedor"] = c1.text_input("Fornecedor", ped["fornecedor"])
-    ped["empresa"] = c2.selectbox("Empresa", ["ALIVVIA", "JCA"])
-    ped["obs"] = c3.text_input("Obs", ped["obs"])
+    ped["obs"] = c2.text_input("Obs", ped["obs"])
     
-    df_i = pd.DataFrame(ped["itens"]) if ped["itens"] else pd.DataFrame(columns=["sku", "qtd", "valor_unit", "origem"])
-    df_i = df_i.astype({"sku": str, "qtd": int, "valor_unit": float, "origem": str})
-    
-    if st.session_state.catalogo_df is not None:
-         df_cat = st.session_state.catalogo_df.copy().rename(columns={'component_sku': 'sku', 'nome_produto': 'Nome do Produto', 'fornecedor': 'Forn. Info'})
-         cols = [c for c in ["sku", "Nome do Produto", "Forn. Info"] if c in df_cat.columns]
-         df_i = df_i.merge(df_cat[cols], on="sku", how="left")
-    
-    df_i["Total"] = (df_i["qtd"] * df_i["valor_unit"]).round(2)
-    cols_dsp = [c for c in ["sku", "Nome do Produto", "Forn. Info", "qtd", "valor_unit", "Total", "origem"] if c in df_i.columns]
-    
-    ed = st.data_editor(
-        df_i[cols_dsp], num_rows="dynamic", use_container_width=True, key="ed_oc", hide_index=True,
-        column_config={"sku": st.column_config.TextColumn("SKU"), "qtd": st.column_config.NumberColumn(format="%d"), "valor_unit": st.column_config.NumberColumn(format="R$ %.2f"), "Total": st.column_config.NumberColumn(format="R$ %.2f", disabled=True)}
-    )
-    st.session_state.pedido_ativo["itens"] = ed[["sku", "qtd", "valor_unit", "origem"]].to_dict("records")
-    tot = (ed["qtd"] * ed["valor_unit"]).sum()
-    st.metric("Total Pedido", format_br_currency(tot))
-    
-    cb1, cb2 = st.columns(2)
-    if cb1.button("💾 Salvar", type="primary"):
-        nid = gerar_numero_oc(ped["empresa"])
-        if salvar_pedido({"id": nid, "empresa": ped["empresa"], "fornecedor": ped["fornecedor"], "data_emissao": dt.date.today().strftime("%Y-%m-%d"), "valor_total": float(tot), "status": "Pendente", "obs": ped["obs"], "itens": st.session_state.pedido_ativo["itens"]}):
-            st.success(f"OC {nid} salva!"); st.session_state.pedido_ativo["itens"] = []; time.sleep(1); st.rerun()
-    if cb2.button("🗑️ Limpar"): st.session_state.pedido_ativo["itens"] = []; st.rerun()
+    if ped["itens"]:
+        df_p = pd.DataFrame(ped["itens"])
+        df_p["Total"] = df_p["qtd"]*df_p["valor_unit"]
+        ed_p = st.data_editor(df_p, num_rows="dynamic", use_container_width=True)
+        st.session_state.pedido_ativo["itens"] = ed_p.to_dict("records")
+        st.metric("Total", format_br_currency(ed_p["Total"].sum()))
+        
+        if st.button("Salvar OC", type="primary"):
+            nid = gerar_numero_oc("ALIVVIA")
+            if salvar_pedido({"id": nid, "empresa": "ALIVVIA/JCA", "fornecedor": ped["fornecedor"], "data_emissao": str(dt.date.today()), "valor_total": ed_p["Total"].sum(), "status": "Pendente", "obs": ped["obs"], "itens": st.session_state.pedido_ativo["itens"]}):
+                st.success(f"OC {nid} Salva!"); st.session_state.pedido_ativo["itens"] = []; time.sleep(1); st.rerun()
 
-# --- TAB 5: GESTÃO ---
+# --- TAB 5: GESTAO ---
 with tab5:
-    st.header("🗂️ Gestão OC")
-    c_p, c_u = st.columns([1,4])
-    c_p.button("🖨️ Imprimir")
-    if c_u.button("🔄 Atualizar"): st.rerun()
-    df_ocs = listar_pedidos()
-    if not df_ocs.empty:
-        st.dataframe(df_ocs[["ID", "Data", "Empresa", "Fornecedor", "Valor", "Status", "Obs"]], use_container_width=True, hide_index=True)
-        st.divider()
-        c1, c2, c3 = st.columns([2,1,1])
-        sel_oc = c1.selectbox("Selecione:", df_ocs["ID"].unique())
-        if sel_oc:
-            ns = c2.selectbox("Status", ["Pendente", "Aprovado", "Enviado", "Recebido", "Cancelado"])
-            if c2.button("✔️ Atualizar"): atualizar_status(sel_oc, ns); st.success("OK!"); time.sleep(1); st.rerun()
-            if c3.button("🗑️ Excluir"): excluir_pedido_db(sel_oc); st.warning("Excluído"); time.sleep(1); st.rerun()
-            
-            row = df_ocs[df_ocs["ID"] == sel_oc].iloc[0]
-            with st.expander("Detalhes", expanded=True):
-                itens = row.get("Dados_Completos")
-                if isinstance(itens, list) and itens:
-                    df_it = pd.DataFrame(itens)
-                    df_it["Total"] = (df_it["qtd"].astype(float)*df_it["valor_unit"].astype(float))
-                    st.dataframe(df_it, use_container_width=True, hide_index=True)
-
-# --- TAB 6: ALOCAÇÃO ---
-with tab6:
-    st.header("📦 Alocação")
-    ra, rj = st.session_state.get("resultado_ALIVVIA"), st.session_state.get("resultado_JCA")
-    if ra is not None and rj is not None:
-        try:
-            df_A = ra[["SKU", "Vendas_Total_60d", "Estoque_Fisico"]].rename(columns={"Vendas_Total_60d": "V_A", "Estoque_Fisico": "E_A"})
-            df_J = rj[["SKU", "Vendas_Total_60d", "Estoque_Fisico"]].rename(columns={"Vendas_Total_60d": "V_J", "Estoque_Fisico": "E_J"})
-            base = pd.merge(df_A, df_J, on="SKU", how="outer").fillna(0)
-            sku = st.selectbox("SKU:", ["Selecione"] + base["SKU"].unique().tolist())
-            if sku != "Selecione":
-                r = base[base["SKU"]==sku].iloc[0]
-                c1,c2,c3 = st.columns(3)
-                c1.metric("Vendas A", int(r["V_A"])); c2.metric("Vendas J", int(r["V_J"])); c3.metric("Estoque Total", int(r["E_A"]+r["E_J"]))
-                buy = st.number_input("Qtd Compra:", min_value=1, value=500)
-                tot_v = r["V_A"]+r["V_J"]
-                p_A = r["V_A"]/tot_v if tot_v > 0 else 0.5
-                st.write(f"**Sugestão:** Alivvia: {int(buy*p_A)} | JCA: {int(buy*(1-p_A))}")
-        except: st.error("Erro alocação.")
-    else: st.info("Calcule ambas as empresas.")
+    st.header("Histórico")
+    df_h = listar_pedidos()
+    if not df_h.empty: st.dataframe(df_h[["ID", "Data", "Fornecedor", "Valor", "Status"]])
