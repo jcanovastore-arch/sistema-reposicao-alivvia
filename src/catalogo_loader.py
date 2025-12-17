@@ -12,40 +12,32 @@ def load_catalogo_padrao(url=URL_PADRAO):
         response.raise_for_status()
         content = io.BytesIO(response.content)
         
-        # Lê as abas
+        # Lê as abas específicas do seu Drive
         df_catalogo = pd.read_excel(content, sheet_name="CATALOGO_SIMPLES")
         content.seek(0)
         df_kits = pd.read_excel(content, sheet_name="KITS")
         
-        # Normalização de nomes de colunas
+        # Normalização agressiva (remove espaços e põe tudo em minúsculo)
         df_catalogo.columns = [str(c).strip().lower() for c in df_catalogo.columns]
         df_kits.columns = [str(c).strip().lower() for c in df_kits.columns]
         
-        # --- CAÇA SKU NO CATÁLOGO ---
-        sku_col = None
-        for c in df_catalogo.columns:
-            if any(k in c for k in ['sku', 'codigo', 'item', 'referencia']):
-                sku_col = c
-                break
-        if sku_col:
-            df_catalogo.rename(columns={sku_col: 'sku'}, inplace=True)
-        else:
-            df_catalogo.rename(columns={df_catalogo.columns[0]: 'sku'}, inplace=True)
+        # --- BUSCA O SKU NO CATÁLOGO ---
+        sku_col = next((c for c in df_catalogo.columns if any(k in c for k in ['sku', 'codigo', 'item'])), df_catalogo.columns[0])
+        df_catalogo.rename(columns={sku_col: 'sku'}, inplace=True)
 
-        # --- CAÇA COLUNAS NOS KITS (Baseado no seu arquivo enviado) ---
-        for c in df_kits.columns:
-            if 'kit_sku' in c or 'kit' in c: df_kits.rename(columns={c: 'sku_kit'}, inplace=True)
-            elif 'component' in c or 'item' in c: df_kits.rename(columns={c: 'sku_componente'}, inplace=True)
-            elif 'qty' in c or 'qtd' in c or 'quant' in c: df_kits.rename(columns={c: 'quantidade_componente'}, inplace=True)
+        # --- MAPEIA OS KITS (Conforme a sua planilha enviada) ---
+        df_kits.rename(columns={
+            'kit_sku': 'sku_kit',
+            'component_sku': 'sku_componente',
+            'qty_por_kit': 'quantidade_componente'
+        }, inplace=True)
 
-        # Limpeza final dos SKUs
+        # Limpeza de SKUs para o Merge não falhar
         df_catalogo['sku'] = df_catalogo['sku'].astype(str).str.strip().str.upper()
-        if 'sku_kit' in df_kits.columns:
-            df_kits['sku_kit'] = df_kits['sku_kit'].astype(str).str.strip().str.upper()
-        if 'sku_componente' in df_kits.columns:
-            df_kits['sku_componente'] = df_kits['sku_componente'].astype(str).str.strip().str.upper()
+        df_kits['sku_kit'] = df_kits['sku_kit'].astype(str).str.strip().str.upper()
+        df_kits['sku_componente'] = df_kits['sku_componente'].astype(str).str.strip().str.upper()
             
         return {"catalogo": df_catalogo, "kits": df_kits}
     except Exception as e:
-        st.error(f"Erro no Catálogo: {e}")
+        st.error(f"Erro na Planilha: {e}")
         return None
