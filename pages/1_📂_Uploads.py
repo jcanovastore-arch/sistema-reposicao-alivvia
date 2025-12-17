@@ -10,7 +10,6 @@ col_alivvia, col_jca = st.columns(2)
 def render_file_slot(empresa, label_amigavel, tipo_arquivo):
     """
     Cria um bloco visual para gerenciar um único arquivo.
-    Ex: Alivvia -> Full
     """
     # Caminho exato no Supabase
     path_cloud = f"{empresa}/{tipo_arquivo}.xlsx"
@@ -24,11 +23,15 @@ def render_file_slot(empresa, label_amigavel, tipo_arquivo):
         # Se existe, mostra caixa verde com botão de excluir
         c1, c2 = st.columns([0.8, 0.2])
         c1.success("✅ Arquivo Salvo na Nuvem")
+        
+        # Lógica para DELETAR
         if c2.button("🗑️", key=f"del_{path_cloud}", help="Excluir arquivo"):
             if storage.delete_file(path_cloud):
                 st.toast(f"{label_amigavel} excluído!")
                 time.sleep(1)
                 st.rerun()
+            else:
+                st.error("Erro ao deletar o arquivo. Verifique as permissões de DELETE.")
     else:
         # Se não existe, mostra aviso amarelo
         st.warning("⚠️ Pendente de envio")
@@ -36,20 +39,21 @@ def render_file_slot(empresa, label_amigavel, tipo_arquivo):
     # 2. Área de Upload (Sempre visível para permitir sobrescrever)
     arquivo = st.file_uploader(
         f"Enviar {label_amigavel}", 
-        type=["xlsx", "csv"], 
+        type=["xlsx"], # Tipos aceitos pelo sistema
         key=f"up_{path_cloud}",
         label_visibility="collapsed"
     )
     
-    # 3. Lógica de Envio
+    # 3. Lógica de Envio (COM A PAUSA PARA EVITAR LOOP)
     if arquivo:
         with st.spinner("Enviando para o Supabase..."):
             if storage.upload(arquivo, path_cloud):
                 st.success("Upload concluído!")
-                time.sleep(1)
-                st.rerun() # Recarrega para atualizar o status visual acima
+                # PAUSA CRÍTICA DE 1 SEGUNDO PARA EVITAR O LOOP INFINITO
+                time.sleep(1) 
+                st.rerun() # Recarrega para atualizar o status visual para "Salvo na Nuvem"
             else:
-                st.error("Erro ao enviar. Tente novamente.")
+                st.error("Erro ao enviar. Tente novamente ou verifique as permissões de INSERT.")
     
     st.divider()
 
