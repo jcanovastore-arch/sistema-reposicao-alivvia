@@ -24,7 +24,6 @@ def read_file_from_storage(empresa, tipo_arquivo):
             df = pd.read_csv(content_io, skiprows=skip, sep=None, engine='python', encoding='utf-8-sig')
         
         df = utils.normalize_cols(df)
-        # GARANTE QUE A COLUNA SKU EXISTA E ESTEJA EM MAIÚSCULO
         if 'sku' in df.columns:
             df['sku'] = df['sku'].apply(utils.norm_sku)
         return df
@@ -32,73 +31,60 @@ def read_file_from_storage(empresa, tipo_arquivo):
         return None
 
 def calcular_reposicao(empresa, dias_cobertura, crescimento=0, lead_time=0):
-    # 1. Carregar Bases Reais
+    # 1. Carregar Bases
     df_full = get_relatorio_full(empresa)      
     df_ext = get_vendas_externas(empresa)      
     df_fisico = get_estoque_fisico(empresa)    
     
     dados_cat = st.session_state.get('catalogo_dados')
     if not dados_cat: return None
-    df_catalogo = dados_cat['catalogo']
+    df_catalogo = dados_cat['catalogo'].copy()
+    df_catalogo['sku'] = df_catalogo['sku'].apply(utils.norm_sku)
 
-    # 2. Tratamento Estoque Físico e Custo (Jaca - Estoque)
-    if df_fisico is not None:
+    # 2. Tratamento Estoque Físico e Custo
+    if df_fisico is not None and not df_fisico.empty:
         df_fisico['estoque_fisico'] = df_fisico['estoque_atual'].apply(utils.br_to_float).fillna(0)
         df_fisico['custo_unit'] = df_fisico['preco'].apply(utils.br_to_float).fillna(0)
-        estoque_real = df_fisico.groupby('sku').agg({
-            'estoque_fisico': 'sum',
-            'custo_unit': 'max'
-        }).reset_index()
+        estoque_real = df_fisico.groupby('sku').agg({'estoque_fisico': 'sum', 'custo_unit': 'max'}).reset_index()
     else:
         estoque_real = pd.DataFrame(columns=['sku', 'estoque_fisico', 'custo_unit'])
 
     # 3. Tratamento Vendas Full (ML)
-    if df_full is not None:
+    if df_full is not None and not df_full.empty:
         df_full['v_full'] = df_full['vendas_qtd_61d'].apply(utils.br_to_float).fillna(0)
         df_full['e_full'] = df_full['estoque_atual'].apply(utils.br_to_float).fillna(0)
         vendas_full = df_full.groupby('sku').agg({'v_full': 'sum', 'e_full': 'sum'}).reset_index()
     else:
         vendas_full = pd.DataFrame(columns=['sku', 'v_full', 'e_full'])
 
-    # 4. Tratamento Vendas Shopee (EXT) - CORRIGIDO
-    if df_ext is not None:
-        # Pega a coluna 'qtde_vendas' (que é o 'Qtde. Vendas' normalizado)
-        df_ext['v_shopee'] = df_ext['qtde_vendas'].apply(utils.br_to_float).fillna(0)
+    # 4. Tratamento Vendas Shopee (EXT)
+    if df_ext is not None and not df_ext.empty:
+        # Pega a coluna 'qtde_vendas' que vem do normalize_cols
+        col_venda = 'qtde_vendas' if 'qtde_vendas' in df_ext.columns else df_ext.columns[2]
+        df_ext['v_shopee'] = df_ext[col_venda].apply(utils.br_to_float).fillna(0)
         vendas_shopee = df_ext.groupby('sku').agg({'v_shopee': 'sum'}).reset_index()
     else:
         vendas_shopee = pd.DataFrame(columns=['sku', 'v_shopee'])
 
-    # 5. MERGE FINAL (Base no Catálogo)
+    # 5. MERGE FINAL
     df_res = df_catalogo[['sku', 'fornecedor']].copy()
-    df_res['sku'] = df_res['sku'].apply(utils.norm_sku)
-
     df_res = pd.merge(df_res, estoque_real, on='sku', how='left')
     df_res = pd.merge(df_res, vendas_full, on='sku', how='left')
     df_res = pd.merge(df_res, vendas_shopee, on='sku', how='left')
-    
     df_res.fillna(0, inplace=True)
 
-    # 6. Lógica de Cálculo
+    # 6. Cálculos
     df_res['Vendas_Total_60d'] = df_res['v_full'] + df_res['v_shopee']
     df_res['Venda_Diaria'] = (df_res['Vendas_Total_60d'] * (1 + (crescimento/100))) / 60
     df_res['Estoque_Total'] = df_res['estoque_fisico'] + df_res['e_full']
     
-    # Compra Sugerida
     df_res['Compra_Sugerida'] = (df_res['Venda_Diaria'] * (dias_cobertura + lead_time)) - df_res['Estoque_Total']
     df_res['Compra_Sugerida'] = df_res['Compra_Sugerida'].apply(lambda x: int(np.ceil(x)) if x > 0 else 0)
-    
-    # Valor Total
     df_res['Valor_Compra'] = df_res['Compra_Sugerida'] * df_res['custo_unit']
 
-    # Mapeamento para os nomes exatos pedidos
     return df_res.rename(columns={
-        'sku': 'SKU',
-        'fornecedor': 'Fornecedor',
-        'custo_unit': 'Preço de custo',
-        'v_full': 'Vendas full',
-        'v_shopee': 'vendas Shopee',
-        'e_full': 'Estoque full',
-        'estoque_fisico': 'Estoque fisico',
-        'Compra_Sugerida': 'Compra sugerida',
-        'Valor_Compra': 'Valor total da compra sugerida'
+        'sku': 'SKU', 'fornecedor': 'Fornecedor', 'custo_unit': 'Preço de custo',
+        'v_full': 'Vendas full', 'v_shopee': 'vendas Shopee',
+        'e_full': 'Estoque full', 'estoque_fisico': 'Estoque fisico',
+        'Compra_Sugerida': 'Compra sugerida', 'Valor_Compra': 'Valor total da compra sugerida'
     })
