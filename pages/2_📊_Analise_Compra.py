@@ -5,7 +5,7 @@ from src.logic import calcular_reposicao
 st.set_page_config(page_title="Análise de Compra", layout="wide")
 st.title("📊 Painel de Compras")
 
-# --- SIDEBAR: PARÂMETROS E FILTROS ---
+# --- SIDEBAR COM PARÂMETROS E FILTRO DE SKU ---
 with st.sidebar:
     st.header("⚙️ Parâmetros")
     dias_horizonte = st.number_input("Dias Cobertura", min_value=15, value=45, step=5)
@@ -13,8 +13,8 @@ with st.sidebar:
     lead_time = st.number_input("Lead Time (Dias)", min_value=0, value=0, step=1)
     
     st.divider()
-    st.header("🔍 Filtros Globais")
-    filtro_sku = st.text_input("Buscar SKU").strip().upper()
+    st.header("🔍 Busca Rápida")
+    filtro_sku = st.text_input("Filtrar por SKU").strip().upper()
     
     if st.button("🔄 Recalcular", type="primary", use_container_width=True):
         st.cache_data.clear()
@@ -25,38 +25,43 @@ def get_analise(dias, cresc, lead):
     analises = {}
     for emp in ["ALIVVIA", "JCA"]:
         df = calcular_reposicao(emp, dias, cresc, lead)
-        if df is not None: analises[emp] = df
+        if df is not None:
+            analises[emp] = df
     return analises
 
 resultados = get_analise(dias_horizonte, crescimento, lead_time)
 
-# COLUNAS QUE VOCÊ EXIGIU
-colunas_finais = [
+# COLUNAS FIXAS EXIGIDAS POR VOCÊ
+colunas_exigidas = [
     "SKU", "Fornecedor", "Preço de custo", "Vendas full", 
     "vendas Shopee", "Estoque full", "Estoque fisico", 
     "Compra sugerida", "Valor total da compra sugerida"
 ]
 
 if not resultados:
-    st.error("⚠️ Dados não carregados. Verifique os arquivos no gerenciador.")
+    st.warning("⚠️ Carregue o catálogo na Home e faça o upload dos arquivos no Gerenciador.")
 else:
     for emp, df in resultados.items():
-        if df is None or df.empty: continue
+        # Blindagem: se por algum erro o df vier vazio ou None, não quebra a tela
+        if df is None or df.empty:
+            st.error(f"Não foi possível processar os dados da {emp}.")
+            continue
             
         with st.expander(f"📦 Resultado {emp}", expanded=True):
-            # Filtro SKU
+            # 1. Filtro de SKU (Busca)
             if filtro_sku:
                 df = df[df['SKU'].str.contains(filtro_sku, na=False)]
             
-            # Filtro Fornecedor Dinâmico
-            lista_forn = sorted(df['Fornecedor'].dropna().unique().tolist())
-            fornecedores_sel = st.multiselect(f"Fornecedores ({emp})", lista_forn)
+            # 2. Filtro de Fornecedor (Multiselect)
+            # O dropna() e unique() garantem que não dê erro se houver lixo nos dados
+            lista_forn = sorted([str(x) for x in df['Fornecedor'].dropna().unique()])
+            fornecedores_sel = st.multiselect(f"Filtrar por Fornecedor ({emp})", lista_forn, key=f"f_{emp}")
             
             if fornecedores_sel:
                 df = df[df['Fornecedor'].isin(fornecedores_sel)]
 
-            # Apenas as colunas solicitadas
-            df_final = df[colunas_finais].sort_values("Compra sugerida", ascending=False)
+            # Exibição Final
+            df_final = df[colunas_exigidas].sort_values("Compra sugerida", ascending=False)
             
             st.dataframe(
                 df_final,
@@ -68,4 +73,5 @@ else:
                 }
             )
             
-            st.markdown(f"**Investimento Total {emp}:** R$ {df_final['Valor total da compra sugerida'].sum():,.2f}")
+            total_invest = df_final['Valor total da compra sugerida'].sum()
+            st.markdown(f"**Total Investimento {emp}:** R$ {total_invest:,.2f}")
