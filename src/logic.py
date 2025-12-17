@@ -4,7 +4,6 @@ import io
 import numpy as np
 from src import storage, utils 
 
-# --- FUNÇÕES DE LEITURA (CONGELADAS) ---
 def find_header_and_read(content_io, keywords=['sku', 'codigo', 'item', 'referencia']):
     try:
         df_temp = pd.read_excel(content_io, header=None, nrows=20)
@@ -39,6 +38,7 @@ def read_file_from_storage(empresa, tipo_arquivo):
     return None
 
 def flex_col(df, keywords):
+    if df is None or df.empty: return None
     for k in keywords:
         for col in df.columns:
             if k in str(col).lower(): return col
@@ -57,10 +57,8 @@ def calcular_reposicao(empresa, dias_cobertura, crescimento=0, lead_time=0):
     fator = (1 + (crescimento/100))
     prazo_total = dias_cobertura + lead_time
 
-    # 2. CÁLCULO DE NECESSIDADE NO FULL (LINHA POR LINHA - SEM COMPENSAÇÃO)
-    # Aqui resolvemos o problema de um anúncio com 200 não ajudar o outro zerado
-    nec_reposicao_full = pd.DataFrame(columns=['sku', 'v_f_u', 'e_f_u', 'demanda_abastecimento_full'])
-    
+    # 2. CÁLCULO FULL (ANÚNCIO POR ANÚNCIO - REGRA DAS CAIXINHAS)
+    nec_reposicao_full = pd.DataFrame(columns=['sku', 'v_f_u', 'e_f_u', 'nec_full'])
     if df_full_raw is not None and not df_full_raw.empty:
         v_col = flex_col(df_full_raw, ['venda_60', 'venda_61', 'venda_qtd', 'venda'])
         e_col = flex_col(df_full_raw, ['disponivel', 'estoque_atual', 'estoque_total', 'estoque'])
@@ -69,47 +67,39 @@ def calcular_reposicao(empresa, dias_cobertura, crescimento=0, lead_time=0):
             df_full_raw['v_un'] = df_full_raw[v_col].apply(utils.br_to_float).fillna(0)
             df_full_raw['e_un'] = df_full_raw[e_col].apply(utils.br_to_float).fillna(0)
             
-            # Calcula carência de cada anúncio individualmente
-            v_diaria_anuncio = (df_full_raw['v_un'] * fator) / 60
-            carencia_anuncio = (v_diaria_anuncio * prazo_total) - df_full_raw['e_un']
-            df_full_raw['falta_no_anuncio'] = carencia_anuncio.apply(lambda x: x if x > 0 else 0)
+            # Necessidade individual do anúncio
+            v_dia = (df_full_raw['v_un'] * fator) / 60
+            df_full_raw['falta'] = ((v_dia * prazo_total) - df_full_raw['e_un']).clip(lower=0)
             
-            # Explosão de Kits para Componentes (Necessidade de envio)
-            df_full_kits = pd.merge(df_full_raw, df_kits, left_on='sku', right_on='sku_kit', how='left')
-            # Se não é kit, trata como 1 componente dele mesmo
-            df_full_kits['sku_componente'] = df_full_kits['sku_componente'].fillna(df_full_kits['sku'])
-            df_full_kits['quantidade_componente'] = df_full_kits['quantidade_componente'].fillna(1)
+            # Explosão de Kits no Full
+            df_f_exp = pd.merge(df_full_raw, df_kits, left_on='sku', right_on='sku_kit', how='left')
+            df_f_exp['sku_comp'] = df_f_exp['sku_componente'].fillna(df_f_exp['sku'])
+            df_f_exp['qty_comp'] = df_f_exp['quantidade_componente'].fillna(1)
             
-            # Demanda de componentes para suprir as faltas do Full
-            df_full_kits['nec_comp'] = df_full_kits['falta_no_anuncio'] * df_full_kits['quantidade_componente']
+            df_f_exp['v_comp'] = df_f_exp['v_un'] * df_f_exp['qty_comp']
+            df_f_exp['nec_comp'] = df_f_exp['falta'] * df_f_exp['qty_comp']
             
-            # Agrupa por componente para saber o total que o Full está "pedindo" do físico
-            nec_reposicao_full = df_full_kits.groupby('sku_componente').agg({
-                'v_un': 'sum', # Apenas para histórico visual
-                'e_un': 'sum', # Apenas para histórico visual
-                'nec_comp': 'sum' # O que realmente precisa ser enviado/comprado
-            }).reset_index().rename(columns={
-                'sku_componente': 'sku', 'v_un': 'v_f_u', 'e_un': 'e_f_u', 'nec_comp': 'nec_full'
-            })
+            nec_reposicao_full = df_f_exp.groupby('sku_comp').agg({
+                'v_comp': 'sum', 'e_un': 'sum', 'nec_comp': 'sum'
+            }).reset_index().rename(columns={'sku_comp': 'sku', 'v_comp': 'v_f_u', 'e_un': 'e_f_u', 'nec_comp': 'nec_full'})
 
-    # 3. DEMANDA DA SHOPEE
-    v_shopee_map = pd.DataFrame(columns=['sku', 'v_s_u', 'demanda_shopee'])
+    # 3. CÁLCULO SHOPEE (EXPLOSÃO DE KITS)
+    v_shopee_map = pd.DataFrame(columns=['sku', 'v_s_u', 'dem_s'])
     if df_ext_raw is not None and not df_ext_raw.empty:
         v_col_s = flex_col(df_ext_raw, ['venda', 'qtde', 'qtd', 'quantidade'])
         if v_col_s:
-            df_ext_raw['v_s_u'] = df_ext_raw[v_col_s].apply(utils.br_to_float).fillna(0)
-            # Explosão de kits da Shopee para demanda de componentes
-            df_s_kits = pd.merge(df_ext_raw, df_kits, left_on='sku', right_on='sku_kit', how='left')
-            df_s_kits['sku_componente'] = df_s_kits['sku_componente'].fillna(df_s_kits['sku'])
-            df_s_kits['quantidade_componente'] = df_s_kits['quantidade_componente'].fillna(1)
+            df_ext_raw['v_un_s'] = df_ext_raw[v_col_s].apply(utils.br_to_float).fillna(0)
+            df_s_exp = pd.merge(df_ext_raw, df_kits, left_on='sku', right_on='sku_kit', how='left')
+            df_s_exp['sku_comp'] = df_s_exp['sku_componente'].fillna(df_s_exp['sku'])
+            df_s_exp['qty_comp'] = df_s_exp['quantidade_componente'].fillna(1)
             
-            # Demanda real de componentes na Shopee
-            v_diaria_s = (df_s_kits['v_s_u'] * fator) / 60
-            df_s_kits['dem_s'] = v_diaria_s * prazo_total
+            df_s_exp['v_comp_s'] = df_s_exp['v_un_s'] * df_s_exp['qty_comp']
+            v_dia_s = (df_s_exp['v_comp_s'] * fator) / 60
+            df_s_exp['dem_s_calc'] = v_dia_s * prazo_total
             
-            v_shopee_map = df_s_kits.groupby('sku_componente').agg({
-                'v_s_u': 'sum', 'dem_s': 'sum'
-            }).reset_index().rename(columns={'sku_componente': 'sku'})
+            v_shopee_map = df_s_exp.groupby('sku_comp').agg({
+                'v_comp_s': 'sum', 'dem_s_calc': 'sum'
+            }).reset_index().rename(columns={'sku_comp': 'sku', 'v_comp_s': 'v_s_u', 'dem_s_calc': 'dem_s'})
 
     # 4. ESTOQUE FÍSICO E CUSTO
     est_map = pd.DataFrame(columns=['sku', 'est_f_u', 'c_u'])
@@ -127,20 +117,20 @@ def calcular_reposicao(empresa, dias_cobertura, crescimento=0, lead_time=0):
     df_res = pd.merge(df_res, est_map, on='sku', how='left')
     df_res.fillna(0, inplace=True)
 
-    # A COMPRA SUGERIDA: (O que falta no Full + O que a Shopee vai vender) - O que eu tenho em casa
-    demanda_total_casa = df_res['nec_full'] + df_res['dem_s']
-    compra = demanda_total_casa - df_res['est_f_u']
-    df_res['Compra sugerida'] = compra.apply(lambda x: int(np.ceil(x)) if x > 0 else 0)
+    # Cálculo da Compra Sugerida (Falta no Full + Demanda Shopee - Saldo Físico)
+    df_res['Compra sugerida'] = (df_res['nec_full'] + df_res['dem_s'] - df_res['est_f_u']).clip(lower=0).apply(np.ceil).astype(int)
     
-    # Valores financeiros
     df_res['Valor total da compra sugerida'] = df_res['Compra sugerida'] * df_res['c_u']
     df_res['Valor Estoque Full'] = df_res['e_f_u'] * df_res['c_u']
     df_res['Valor Estoque Fisico'] = df_res['est_f_u'] * df_res['c_u']
 
-    # Filtros Finais
+    # 6. FILTRO DE STATUS (FIX PARA O ATTRIBUTEERROR)
     st_col = flex_col(df_res, ['status_reposicao', 'status_repor'])
-    if st_col:
-        df_res = df_res[df_res[st_col].astype(str).lower().str.strip() != 'nao_repor']
+    if st_col and st_col in df_res.columns:
+        # Garantimos que tratamos como string antes de filtrar
+        df_res[st_col] = df_res[st_col].astype(str).str.lower().str.strip()
+        df_res = df_res[df_res[st_col] != 'nao_repor']
+    
     if not df_kits.empty:
         df_res = df_res[~df_res['sku'].isin(df_kits['sku_kit'].unique())]
 
