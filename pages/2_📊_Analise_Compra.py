@@ -1,89 +1,54 @@
-import streamlit as st
-import pandas as pd
-from src.logic import calcular_reposicao
+# --- ABA DE ALOCAÇÃO DE COMPRAS ---
+st.divider()
+st.header("📦 Ferramenta de Alocação de Compras")
+st.info("Esta ferramenta divide uma quantidade total de compra entre as duas empresas com base na proporção de vendas de cada uma.")
 
-st.set_page_config(page_title="Análise de Compra", layout="wide")
-st.title("📊 Painel de Compras Integrado")
+with st.expander("Calcular Divisão de Pedido Grande", expanded=True):
+    col_input1, col_input2 = st.columns(2)
+    with col_input1:
+        sku_aloc = st.text_input("Digite o SKU para alocar", value=f_sku).strip().upper()
+    with col_input2:
+        qtd_total = st.number_input("Quantidade Total do Pedido (Ex: 1000)", min_value=0, value=0)
 
-# Trava para garantir que a carga foi feita na Home
-if not st.session_state.get('catalogo_carregado'):
-    st.error("⚠️ Catálogo não carregado. Volte à Home e clique em 'Carregar Padrão KITS/CATALOGO'.")
-    st.stop()
-
-# --- SIDEBAR: PARÂMETROS E FILTROS ---
-with st.sidebar:
-    st.header("⚙️ Parâmetros")
-    dias_h = st.number_input("Dias Cobertura", min_value=15, value=45, step=5)
-    cresc = st.number_input("Crescimento %", min_value=0.0, value=0.0, step=5.0)
-    lead = st.number_input("Lead Time (Dias)", min_value=0, value=0, step=1)
-    
-    st.divider()
-    st.header("🔍 Filtros Globais")
-    f_sku = st.text_input("Filtrar SKU").strip().upper()
-    
-    if st.button("🔄 Recalcular Tudo", type="primary", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
-
-@st.cache_data
-def carregar_resultados(d, c, l):
-    return {
-        "ALIVVIA": calcular_reposicao("ALIVVIA", d, c, l),
-        "JCA": calcular_reposicao("JCA", d, c, l)
-    }
-
-resultados = carregar_resultados(dias_h, cresc, lead)
-
-# Colunas exigidas por você (9 colunas de dados + 2 de valoração)
-colunas_exigidas = [
-    "SKU", "Fornecedor", "Preço de custo", 
-    "Vendas full", "vendas Shopee", 
-    "Estoque full (Un)", "Valor Estoque Full",
-    "Estoque fisico (Un)", "Valor Estoque Fisico",
-    "Compra sugerida", "Valor total da compra sugerida"
-]
-
-# Captura fornecedores de todas as empresas para o filtro global
-todos_forn = []
-for df_temp in resultados.values():
-    if df_temp is not None and not df_temp.empty:
-        todos_forn.extend(df_temp['Fornecedor'].dropna().unique())
-lista_forn_global = sorted([str(x) for x in set(todos_forn) if str(x) not in ["0", "nan", "None"]])
-
-with st.sidebar:
-    sel_forn_global = st.multiselect("Filtrar Fornecedor (Global)", lista_forn_global)
-
-# --- EXIBIÇÃO DAS EMPRESAS ---
-for emp in ["ALIVVIA", "JCA"]:
-    df = resultados.get(emp)
-    
-    if df is not None and not df.empty:
-        st.subheader(f"🏢 Empresa: {emp}")
-        
-        # Aplicar Filtros Globais
-        if f_sku:
-            df = df[df['SKU'].str.contains(f_sku, na=False)]
-        if sel_forn_global:
-            df = df[df['Fornecedor'].isin(sel_forn_global)]
-
-        # Seleção e Ordenação
-        df_final = df[colunas_exigidas].sort_values("Compra sugerida", ascending=False)
-        
-        st.dataframe(
-            df_final,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Preço de custo": st.column_config.NumberColumn(format="R$ %.2f"),
-                "Valor Estoque Full": st.column_config.NumberColumn(format="R$ %.2f"),
-                "Valor Estoque Fisico": st.column_config.NumberColumn(format="R$ %.2f"),
-                "Valor total da compra sugerida": st.column_config.NumberColumn(format="R$ %.2f")
-            }
-        )
-        
-        # Totais por Empresa
-        c1, c2, c3 = st.columns(3)
-        c1.metric(f"💰 Estoque Full {emp}", f"R$ {df_final['Valor Estoque Full'].sum():,.2f}")
-        c2.metric(f"💰 Estoque Físico {emp}", f"R$ {df_final['Valor Estoque Fisico'].sum():,.2f}")
-        c3.metric(f"🛒 Sugestão Compra {emp}", f"R$ {df_final['Valor total da compra sugerida'].sum():,.2f}")
-        st.divider()
+    if st.button("Executar Alocação de Pedido"):
+        if not sku_aloc:
+            st.warning("Por favor, digite um SKU.")
+        elif qtd_total <= 0:
+            st.warning("A quantidade total deve ser maior que zero.")
+        else:
+            # Busca vendas dos dois lados
+            venda_alivvia = 0
+            venda_jca = 0
+            
+            df_a = resultados.get("ALIVVIA")
+            df_j = resultados.get("JCA")
+            
+            if df_a is not None and not df_a.empty:
+                match = df_a[df_a['SKU'] == sku_aloc]
+                if not match.empty:
+                    venda_alivvia = match['Vendas full'].values[0] + match['vendas Shopee'].values[0]
+            
+            if df_j is not None and not df_j.empty:
+                match = df_j[df_j['SKU'] == sku_aloc]
+                if not match.empty:
+                    venda_jca = match['Vendas full'].values[0] + match['vendas Shopee'].values[0]
+            
+            venda_total = venda_alivvia + venda_jca
+            
+            if venda_total == 0:
+                st.error(f"O SKU {sku_aloc} não possui histórico de vendas em nenhuma das empresas.")
+            else:
+                # Cálculo da proporção
+                prop_a = venda_alivvia / venda_total
+                prop_j = venda_jca / venda_total
+                
+                aloc_a = int(np.floor(qtd_total * prop_a))
+                aloc_j = qtd_total - aloc_a # JCA fica com o resto para fechar o total exato
+                
+                # Exibição do Resultado
+                res_c1, res_c2, res_c3 = st.columns(3)
+                res_c1.metric("Para ALIVVIA", f"{aloc_a} un", f"{prop_a:.1%}")
+                res_c2.metric("Para JCA", f"{aloc_j} un", f"{prop_j:.1%}")
+                res_c3.metric("Total Confirmado", f"{aloc_a + aloc_j} un")
+                
+                st.success(f"Cálculo baseado em: Vendas ALIVVIA ({venda_alivvia}) | Vendas JCA ({venda_jca})")
