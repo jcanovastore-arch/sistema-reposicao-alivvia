@@ -15,38 +15,49 @@ def read_file_from_storage(empresa, tipo_arquivo):
     content_io = io.BytesIO(content)
     try:
         df = None
-        # LEITURA
-        if tipo_arquivo == "FULL":
-            df = pd.read_excel(content_io, skiprows=2)
-        else:
-            # Tenta ler CSV ignorando erros de aspas
+        # --- ESTRATÉGIA HÍBRIDA DE LEITURA (Excel ou CSV) ---
+        # Tenta ler como Excel primeiro (Padrão do ML Full)
+        try:
+            # Full geralmente pula 2 linhas de cabeçalho
+            skip = 2 if tipo_arquivo == "FULL" else 0
+            df = pd.read_excel(content_io, skiprows=skip)
+        except:
+            # Se falhar, tenta ler como CSV (Caso você tenha salvado como csv)
+            content_io.seek(0)
             try:
-                content_io.seek(0)
-                df = pd.read_csv(content_io, encoding='utf-8-sig', sep=',', quotechar='"')
+                # Tenta utf-8-sig (Excel CSV padrão)
+                df = pd.read_csv(content_io, encoding='utf-8-sig', sep=',', quotechar='"', skiprows=0)
                 if len(df.columns) <= 1: raise Exception()
             except:
                 content_io.seek(0)
-                df = pd.read_csv(content_io, encoding='latin1', sep=';', quotechar='"')
+                # Tenta latin1 (Excel Brasil antigo)
+                df = pd.read_csv(content_io, encoding='latin1', sep=';', quotechar='"', skiprows=0)
 
-        # NORMALIZAÇÃO
+        # Normaliza colunas
         df = utils.normalize_cols(df)
         
-        # --- CORREÇÃO DE ÚLTIMA INSTÂNCIA ---
-        # Se por algum motivo o utils falhou, forçamos a renomeação aqui
-        if 'sku' not in df.columns and 'codigo_sku' in df.columns:
-            df.rename(columns={'codigo_sku': 'sku'}, inplace=True)
-            
+        # --- VALIDAÇÃO DE SEGURANÇA ---
+        # Verifica SKU
         if 'sku' not in df.columns:
-            st.error(f"Erro Crítico em {tipo_arquivo}: Não encontrei 'sku'. Colunas visíveis: {list(df.columns)}")
+            # Tenta salvar se for codigo_sku
+            if 'codigo_sku' in df.columns: 
+                df.rename(columns={'codigo_sku': 'sku'}, inplace=True)
+            else:
+                st.error(f"❌ Erro no arquivo {tipo_arquivo} ({empresa}): Não encontrei a coluna 'SKU'. Colunas lidas: {list(df.columns)}")
+                return None
+        
+        # Verifica VENDAS (Apenas para o arquivo FULL)
+        if tipo_arquivo == "FULL" and 'vendas_qtd' not in df.columns:
+            st.error(f"❌ Erro no arquivo FULL ({empresa}): Não encontrei a coluna 'Vendas Qtd'. Você enviou o arquivo certo? Colunas lidas: {list(df.columns)}")
             return None
-            
+
         return df
     except Exception as e:
         st.error(f"Erro ao processar {tipo_arquivo}: {e}")
         return None
 
 def calcular_reposicao(df_full, df_fisico, df_ext, df_kits, df_catalogo, empresa):
-    # Padronização de SKUs
+    # Padroniza SKUs
     df_full['sku'] = df_full['sku'].apply(utils.norm_sku)
     df_fisico['sku'] = df_fisico['sku'].apply(utils.norm_sku)
     df_kits['sku_kit'] = df_kits['sku_kit'].apply(utils.norm_sku)
