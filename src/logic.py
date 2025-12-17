@@ -4,11 +4,6 @@ import io
 import numpy as np
 from src import storage, utils 
 
-# Funções de leitura do Gerenciador (Storage)
-def get_relatorio_full(empresa): return read_file_from_storage(empresa, "FULL")
-def get_vendas_externas(empresa): return read_file_from_storage(empresa, "EXT")
-def get_estoque_fisico(empresa): return read_file_from_storage(empresa, "FISICO")
-
 def read_file_from_storage(empresa, tipo_arquivo):
     path = f"{empresa}/{tipo_arquivo}.xlsx"
     content = storage.download(path)
@@ -16,31 +11,37 @@ def read_file_from_storage(empresa, tipo_arquivo):
     content_io = io.BytesIO(content)
     skip = 2 if tipo_arquivo == "FULL" else 0
     try:
-        df = pd.read_excel(content_io, skiprows=skip)
-        df.columns = [str(c).strip().lower() for c in df.columns]
+        try:
+            df = pd.read_excel(content_io, skiprows=skip)
+        except:
+            content_io.seek(0)
+            df = pd.read_csv(content_io, skiprows=skip, sep=None, engine='python', encoding='utf-8-sig')
+        
+        df = utils.normalize_cols(df)
+        
+        # Caçador de SKU (Procura por termos comuns)
+        sku_keywords = ['sku', 'codigo', 'cod', 'item', 'referencia', 'produto']
         for col in df.columns:
-            if any(k in col for k in ['sku', 'codigo', 'item']):
+            if any(k == col or k in col for k in sku_keywords):
                 df.rename(columns={col: 'sku'}, inplace=True)
                 break
+        
         if 'sku' in df.columns:
-            df['sku'] = df['sku'].astype(str).str.strip().str.upper()
+            df['sku'] = df['sku'].apply(utils.norm_sku)
         return df
     except: return None
 
-# Lógica para transformar Venda de Kit em Venda de Componente
 def explodir_vendas(df_vendas, df_kits, col_venda):
     if df_vendas is None or df_vendas.empty or df_kits is None or df_kits.empty:
         return pd.DataFrame(columns=['sku', col_venda])
     
     df_merge = pd.merge(df_vendas, df_kits, left_on='sku', right_on='sku_kit', how='inner')
-    df_merge['v_explodida'] = df_merge[col_venda] * pd.to_numeric(df_merge['quantidade_componente'], errors='coerce').fillna(1)
-    
-    df_exp = df_merge.groupby('sku_componente')['v_explodida'].sum().reset_index()
-    df_exp.rename(columns={'sku_componente': 'sku', 'v_explodida': col_venda}, inplace=True)
+    df_merge['v_calc'] = df_merge[col_venda] * df_merge['quantidade_componente'].fillna(1).astype(float)
+    df_exp = df_merge.groupby('sku_componente')['v_calc'].sum().reset_index()
+    df_exp.rename(columns={'sku_componente': 'sku', 'v_calc': col_venda}, inplace=True)
     return df_exp
 
 def calcular_reposicao(empresa, dias_cobertura, crescimento=0, lead_time=0):
-    # 1. CARGA DE BASES
     df_full_raw = get_relatorio_full(empresa)      
     df_ext_raw = get_vendas_externas(empresa)      
     df_fisico_raw = get_estoque_fisico(empresa)    
@@ -50,11 +51,11 @@ def calcular_reposicao(empresa, dias_cobertura, crescimento=0, lead_time=0):
     df_catalogo = dados_cat['catalogo'].copy()
     df_kits = dados_cat['kits'].copy()
 
-    # 2. VENDAS FULL (ML) + EXPLOSÃO
+    # 1. PROCESSAMENTO FULL
     v_full_map = pd.DataFrame(columns=['sku', 'v_f_u', 'e_f_u'])
     if df_full_raw is not None and not df_full_raw.empty:
-        v_col = next((c for c in df_full_raw.columns if 'venda' in c and 'qtd' in c), None)
-        e_col = next((c for c in df_full_raw.columns if 'estoque' in c or 'dispon' in c), None)
+        v_col = next((c for c in df_full_raw.columns if 'venda' in c and ('60' in c or '61' in c or 'qtd' in c)), None)
+        e_col = next((c for c in df_full_raw.columns if 'estoque' in c or 'dispon' in c or 'atual' in c), None)
         if v_col and e_col:
             df_full_raw['v_f_u'] = df_full_raw[v_col].apply(utils.br_to_float).fillna(0)
             df_f_exp = explodir_vendas(df_full_raw[['sku', 'v_f_u']], df_kits, 'v_f_u')
@@ -62,35 +63,36 @@ def calcular_reposicao(empresa, dias_cobertura, crescimento=0, lead_time=0):
             e_f_total = df_full_raw.groupby('sku')[e_col].sum().reset_index().rename(columns={e_col: 'e_f_u'})
             v_full_map = pd.merge(v_f_total, e_f_total, on='sku', how='outer').fillna(0)
 
-    # 3. VENDAS SHOPEE + EXPLOSÃO
+    # 2. PROCESSAMENTO EXTERNO (SHOPEE)
     v_shopee_map = pd.DataFrame(columns=['sku', 'v_s_u'])
     if df_ext_raw is not None and not df_ext_raw.empty:
-        v_col_s = next((c for c in df_ext_raw.columns if 'venda' in c or 'qtde' in c), None)
+        v_col_s = next((c for c in df_ext_raw.columns if any(k in c for k in ['venda', 'qtde', 'qtd', 'quantidade'])), None)
         if v_col_s:
             df_ext_raw['v_s_u'] = df_ext_raw[v_col_s].apply(utils.br_to_float).fillna(0)
             df_s_exp = explodir_vendas(df_ext_raw[['sku', 'v_s_u']], df_kits, 'v_s_u')
             v_shopee_map = pd.concat([df_ext_raw[['sku', 'v_s_u']], df_s_exp]).groupby('sku')['v_s_u'].sum().reset_index()
 
-    # 4. ESTOQUE FÍSICO E CUSTO
+    # 3. PROCESSAMENTO FÍSICO (TINY/BLING)
     est_map = pd.DataFrame(columns=['sku', 'est_f_u', 'c_u'])
     if df_fisico_raw is not None and not df_fisico_raw.empty:
-        e_col_f = next((c for c in df_fisico_raw.columns if 'estoque' in c), None)
-        p_col_f = next((c for c in df_fisico_raw.columns if 'preco' in c or 'custo' in c), None)
+        # Busca agressiva por estoque
+        e_col_f = next((c for c in df_fisico_raw.columns if any(k in c for k in ['estoque', 'atual', 'saldo', 'fisico'])), None)
+        # Busca agressiva por preço/custo
+        p_col_f = next((c for c in df_fisico_raw.columns if any(k in c for k in ['preco', 'custo', 'compra', 'unit'])), None)
+        
         if e_col_f and p_col_f:
             df_fisico_raw['est_f_u'] = df_fisico_raw[e_col_f].apply(utils.br_to_float).fillna(0)
             df_fisico_raw['c_u'] = df_fisico_raw[p_col_f].apply(utils.br_to_float).fillna(0)
             est_map = df_fisico_raw.groupby('sku').agg({'est_f_u': 'sum', 'c_u': 'max'}).reset_index()
 
-    # 5. MERGE FINAL (REGRAS DE CANAL SEPARADAS)
-    if 'sku' not in df_catalogo.columns: return None
-
+    # 4. MERGE E CÁLCULOS
     df_res = pd.merge(df_catalogo, v_full_map, on='sku', how='left')
     df_res = pd.merge(df_res, v_shopee_map, on='sku', how='left')
     df_res = pd.merge(df_res, est_map, on='sku', how='left')
     df_res.fillna(0, inplace=True)
 
-    # 6. CÁLCULO DE REPOSIÇÃO POR CAIXINHA
     fator = (1 + (crescimento/100))
+    # Cálculo por Caixinha
     v_dia_f = (df_res['v_f_u'] * fator) / 60
     nec_f = (v_dia_f * (dias_cobertura + lead_time)) - df_res['e_f_u']
     df_res['Sugerido_Full'] = nec_f.apply(lambda x: int(np.ceil(x)) if x > 0 else 0)
@@ -99,19 +101,18 @@ def calcular_reposicao(empresa, dias_cobertura, crescimento=0, lead_time=0):
     nec_s = (v_dia_s * (dias_cobertura + lead_time)) - df_res['est_f_u']
     df_res['Sugerido_Fisico'] = nec_s.apply(lambda x: int(np.ceil(x)) if x > 0 else 0)
 
-    # Compra Sugerida: Soma das faltas de cada canal (FULL + FÍSICO)
     df_res['Compra sugerida'] = df_res['Sugerido_Full'] + df_res['Sugerido_Fisico']
     df_res['Valor total da compra sugerida'] = df_res['Compra sugerida'] * df_res['c_u']
     df_res['Valor Estoque Full'] = df_res['e_f_u'] * df_res['c_u']
     df_res['Valor Estoque Fisico'] = df_res['est_f_u'] * df_res['c_u']
 
-    # Filtro Não Repor
-    status_col = next((c for c in df_res.columns if 'status' in c or 'repor' in c), None)
-    if status_col:
-        df_res = df_res[df_res[status_col].astype(str).str.lower().str.strip() != 'nao_repor']
+    # Filtros Finais
+    st_col = next((c for c in df_res.columns if 'status' in c or 'repor' in c), None)
+    if st_col:
+        df_res = df_res[df_res[st_col].astype(str).str.lower().str.strip() != 'nao_repor']
     
-    # Remove KITS da lista (foca nos componentes que você realmente compra)
-    if not df_kits.empty and 'sku_kit' in df_kits.columns:
+    # Remove KITS para focar nos componentes
+    if not df_kits.empty:
         df_res = df_res[~df_res['sku'].isin(df_kits['sku_kit'].unique())]
 
     return df_res.rename(columns={
@@ -119,3 +120,8 @@ def calcular_reposicao(empresa, dias_cobertura, crescimento=0, lead_time=0):
         'v_f_u': 'Vendas full', 'v_s_u': 'vendas Shopee',
         'e_f_u': 'Estoque full (Un)', 'est_f_u': 'Estoque fisico (Un)'
     })
+
+# Funções auxiliares (CONGELADAS)
+def get_relatorio_full(empresa): return read_file_from_storage(empresa, "FULL")
+def get_vendas_externas(empresa): return read_file_from_storage(empresa, "EXT")
+def get_estoque_fisico(empresa): return read_file_from_storage(empresa, "FISICO")
