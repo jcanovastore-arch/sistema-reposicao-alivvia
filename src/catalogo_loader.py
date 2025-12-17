@@ -4,34 +4,35 @@ import io
 import requests
 from src import utils
 
-def load_catalogo_padrao(url):
+# LINK DIRETO DA SUA PLANILHA (Aba CATALOGO_SIMPLES e KITS)
+URL_PADRAO = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/export?format=xlsx"
+
+def load_catalogo_padrao(url=URL_PADRAO):
     """
-    Lê o catálogo do Google Sheets (aba CATALOGO_SIMPLES)
-    e os kits (aba KITS).
+    Carrega o catálogo. Se não receber uma URL, usa a URL_PADRAO automaticamente.
     """
     try:
         response = requests.get(url)
-        # Verifica se o link do Google Sheets está acessível
-        response.raise_for_status() 
+        response.raise_for_status()
         
         content = io.BytesIO(response.content)
         
-        # Lê as abas específicas
+        # Lê as abas específicas que você definiu
         df_catalogo = pd.read_excel(content, sheet_name="CATALOGO_SIMPLES")
         df_kits = pd.read_excel(content, sheet_name="KITS")
         
-        # Normaliza as colunas (converte para minúsculo, tira espaços e acentos)
+        # Normaliza as colunas (congelado)
         df_catalogo = utils.normalize_cols(df_catalogo)
         df_kits = utils.normalize_cols(df_kits)
         
-        # Padronização de SKUs para garantir que o sistema "enxergue" os produtos
+        # Padroniza SKUs para maiúsculo
         if 'sku' in df_catalogo.columns:
             df_catalogo['sku'] = df_catalogo['sku'].apply(utils.norm_sku)
         
         if 'sku_kit' in df_kits.columns:
             df_kits['sku_kit'] = df_kits['sku_kit'].apply(utils.norm_sku)
-        
+            
         return {"catalogo": df_catalogo, "kits": df_kits}
     except Exception as e:
-        st.error(f"Erro ao carregar Planilha Drive: {e}")
+        st.error(f"Erro ao carregar Planilha: {e}")
         return None
