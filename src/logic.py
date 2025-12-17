@@ -4,13 +4,12 @@ import io
 import numpy as np
 from src import storage, utils 
 
-# --- FUNÇÕES DE LEITURA DO SUPABASE (AUDITADO FINALMENTE) ---
+# --- FUNÇÕES DE LEITURA DO SUPABASE (AJUSTE FINAL DE PARSING) ---
 
 def read_file_from_storage(empresa, tipo_arquivo):
     """Lê e processa arquivos XLSX ou CSV baixados do Supabase."""
     path = f"{empresa}/{tipo_arquivo}.xlsx"
     
-    # Simula o download. Se o seu storage.py estiver ok, esta linha funciona.
     content = storage.download(path)
     if content is None:
         st.warning(f"Arquivo {tipo_arquivo} da {empresa} não encontrado ou vazio.")
@@ -28,44 +27,47 @@ def read_file_from_storage(empresa, tipo_arquivo):
 
     # --- Lógica de Leitura CSV (PARA EXT e FISICO) ---
     
-    # Tenta 1: Padrão Comma Separated (mais provável pelo seu anexo)
+    # Tentativa 1 (Padrão: Vírgula, pulando 2 linhas) - A mais provável para o seu arquivo
     try:
         content_io.seek(0) 
         df = pd.read_csv(
             content_io, 
             encoding='latin1', 
             sep=',', 
-            header=2, # Cabeçalho na 3ª linha
-            engine='python', # Necessário para lidar com aspas complexas
+            skiprows=2,     # <-- SOLUÇÃO FINAL: PULA AS 2 PRIMEIRAS LINHAS DE JUNK
+            header=0,       # <-- LÊ A PRÓXIMA LINHA COMO CABEÇALHO
+            engine='python', # Necessário para lidar com aspas e vírgulas complexas
             on_bad_lines='skip'
         )
-        if df.shape[1] > 1 and 'SKU' in df.columns: 
+        # Validação: se o DataFrame tem mais de 1 coluna e a coluna SKU existe (após normalização)
+        if df.shape[1] > 1 and 'sku' in utils.normalize_cols(df).columns: 
             return utils.normalize_cols(df)
     except:
-        pass # Falha, tenta o próximo formato
+        pass 
         
-    # Tenta 2: Padrão Ponto-e-Vírgula (Padrão brasileiro tradicional)
+    # Tentativa 2 (Padrão: Ponto-e-vírgula, pulando 2 linhas) - Backup
     try:
         content_io.seek(0)
         df = pd.read_csv(
             content_io, 
             encoding='latin1', 
             sep=';', 
-            header=2,
+            skiprows=2, 
+            header=0,
             engine='python', 
             on_bad_lines='skip'
         )
-        if df.shape[1] > 1 and 'SKU' in df.columns: 
+        if df.shape[1] > 1 and 'sku' in utils.normalize_cols(df).columns: 
             return utils.normalize_cols(df)
     except:
-        pass # Falhou todos
+        pass
         
     # Último recurso se tudo falhar
     st.error(f"Erro Crítico: Falha ao ler arquivo {tipo_arquivo} (CSV). Verifique o formato.")
     return None
 
 
-# --- FUNÇÕES WRAPPER DE ACESSO AOS DADOS (Mantenha o resto das funções aqui) ---
+# --- FUNÇÕES WRAPPER, CÁLCULO E LÓGICA (Mantenha o resto das funções aqui) ---
 @st.cache_data(ttl=600)
 def get_relatorio_full(empresa):
     return read_file_from_storage(empresa, "FULL")
@@ -79,8 +81,6 @@ def get_estoque_fisico(empresa):
     return read_file_from_storage(empresa, "FISICO")
 
 
-# --- FUNÇÃO PRINCIPAL DE CÁLCULO (A LÓGICA DE COMPRA) ---
-
 def calcular_reposicao(empresa, bases):
     """
     Função principal que orquestra a lógica de reposição.
@@ -90,17 +90,16 @@ def calcular_reposicao(empresa, bases):
     df_full = bases['df_full']
     df_fisico = bases['df_fisico']
     
-    # Verificação de colunas mínimas (Ajustar conforme o seu real df_fisico/df_full)
-    if 'sku' not in df_fisico.columns:
-        st.error(f"Erro: A base de Estoque {empresa} não contém a coluna 'sku'.")
-        return None
-    if 'sku' not in df_full.columns:
-        st.error(f"Erro: A base de Vendas {empresa} não contém a coluna 'sku'.")
+    # Verificação de colunas mínimas (Pode falhar se o SKU não for lido corretamente!)
+    if 'sku' not in df_fisico.columns or 'sku' not in df_full.columns:
+        st.error(f"Erro de Coluna: O arquivo da {empresa} não tem a coluna 'sku'. O arquivo não foi lido corretamente.")
         return None
     
     st.info("Explosão de kits e merges em andamento...")
     
-    # 2. MERGE: Unir Estoque (FISICO) com Vendas (FULL) e Preços (CATALOGO)
+    # 2. MERGE e CÁLCULO (Código da resposta anterior)
+    
+    # ... (O resto do código de merge e cálculo)
     df_final = pd.merge(
         df_fisico, 
         df_full[['sku', 'vendas_qtd_61d', 'vendas_valor_r$']], 
@@ -115,17 +114,11 @@ def calcular_reposicao(empresa, bases):
         how='left'
     )
     
-    # 3. TRATAMENTO E CÁLCULO DE REPOSIÇÃO
-    
     df_final['Estoque_Fisico'] = df_final['estoque_atual']
     df_final['Vendas_60d'] = df_final['vendas_qtd_61d'].fillna(0)
-    
-    # --- PONTO CRÍTICO: CONVERSÃO NUMÉRICA AGORA É 100% MANUAL ---
     df_final['Preco_Custo'] = df_final['custo_medio'].apply(utils.br_to_float)
-    df_final['Vendas_60d'] = df_final['Vendas_60d'].apply(lambda x: int(x) if pd.notna(x) else 0)
+    df_final['Vendas_60d'] = df_final['Vendas_60d'].astype(int)
 
-
-    # Lógica de falta (Exemplo)
     df_final['Faltam'] = np.where(
         (df_final['Estoque_Fisico'] - df_final['Vendas_60d'] / 60 * 30) < 0,
         (df_final['Vendas_60d'] / 60 * 30) - df_final['Estoque_Fisico'],
