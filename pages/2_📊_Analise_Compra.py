@@ -3,13 +3,13 @@ import pandas as pd
 import numpy as np
 from src.logic import calcular_reposicao
 
-# Configuração da página deve ser a PRIMEIRA coisa
+# Configuração da página
 st.set_page_config(page_title="Análise de Compra", layout="wide")
 
 st.title("📊 Painel de Compras e Alocação")
 
 # Verifica se os dados foram carregados na Home
-if not st.session_state.get('catalogo_carregado'):
+if not st.session_state.get('catalogo_dados'):
     st.error("⚠️ O Catálogo não foi carregado. Volte à Home e clique em 'Carregar Padrão'.")
     st.stop()
 
@@ -22,13 +22,13 @@ with st.sidebar:
     
     st.divider()
     st.header("🔍 Filtros Globais")
-    f_sku = st.text_input("Filtrar SKU (Global)").strip().upper()
+    f_sku = st.text_input("Filtrar SKU na Tabela").strip().upper()
     
     if st.button("🔄 Recalcular Tudo", type="primary", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
-# Função de cálculo com Cache para performance
+# Função de cálculo com Cache
 @st.cache_data
 def carregar_resultados(d, c, l):
     return {
@@ -36,10 +36,9 @@ def carregar_resultados(d, c, l):
         "JCA": calcular_reposicao("JCA", d, c, l)
     }
 
-# Executa o cálculo
 resultados = carregar_resultados(dias_h, cresc, lead)
 
-# --- ABA 1: ANÁLISE DETALHADA ---
+# --- CRIAÇÃO DAS ABAS ---
 tab_analise, tab_alocacao = st.tabs(["📋 Análise por Empresa", "📦 Calculadora de Alocação"])
 
 with tab_analise:
@@ -54,53 +53,61 @@ with tab_analise:
         df = resultados.get(emp)
         if df is not None and not df.empty:
             st.subheader(f"🏢 {emp}")
+            df_view = df.copy()
             if f_sku:
-                df = df[df['SKU'].str.contains(f_sku, na=False)]
+                df_view = df_view[df_view['SKU'].str.contains(f_sku, na=False)]
             
-            st.dataframe(df[colunas_exigidas], use_container_width=True, hide_index=True)
+            st.dataframe(df_view[colunas_exigidas], use_container_width=True, hide_index=True)
         else:
             st.warning(f"Sem dados processados para {emp}.")
 
-# --- ABA 2: ALOCAÇÃO DE COMPRAS (Sua nova ferramenta) ---
+# --- ABA 2: ALOCAÇÃO DE COMPRAS (PUXANDO DO CATÁLOGO) ---
 with tab_alocacao:
-    st.info("Divida um pedido grande entre as empresas baseado na performance real de vendas.")
+    st.header("📦 Divisão Proporcional de Compra")
+    st.info("Selecione um SKU oficial do seu catálogo para dividir o pedido entre ALIVVIA e JCA.")
     
+    # Puxa a lista oficial de SKUs do catálogo carregado
+    lista_skus_oficial = sorted(st.session_state['catalogo_dados']['catalogo']['sku'].unique())
+
     col_al1, col_al2 = st.columns(2)
     with col_al1:
-        sku_aloc = st.text_input("SKU para Alocação", value=f_sku).strip().upper()
+        # Seleção segura: O usuário só escolhe o que existe
+        sku_selecionado = st.selectbox("Selecione o SKU do Catálogo", options=lista_skus_oficial, index=0)
     with col_al2:
-        qtd_total = st.number_input("Quantidade Total a Comprar", min_value=0, value=1000)
+        qtd_total = st.number_input("Quantidade Total da NF (Ex: 1000)", min_value=0, value=1000)
 
     if st.button("CALCULAR DIVISÃO"):
         venda_a = 0
         venda_j = 0
         
-        # Busca vendas nos resultados já calculados
+        # Busca performance real nos cálculos já feitos
         for emp, df in resultados.items():
             if df is not None and not df.empty:
-                row = df[df['SKU'] == sku_aloc]
+                row = df[df['SKU'] == sku_selecionado]
                 if not row.empty:
+                    # Soma vendas Full e Shopee (já explodidas se for o caso)
                     v = row['Vendas full'].values[0] + row['vendas Shopee'].values[0]
                     if emp == "ALIVVIA": venda_a = v
                     else: venda_j = v
 
-        total_vendas = venda_a + venda_j
+        total_vendas_grupo = venda_a + venda_j
 
-        if total_vendas > 0:
-            p_a = venda_a / total_vendas
-            p_j = venda_j / total_vendas
+        if total_vendas_grupo > 0:
+            p_a = venda_a / total_vendas_grupo
+            p_j = venda_j / total_vendas_grupo
             
-            # Alocação proporcional
+            # Alocação
             aloc_a = int(np.floor(qtd_total * p_a))
-            aloc_j = qtd_total - aloc_a
+            aloc_j = qtd_total - aloc_a # Ajuste para não sobrar nem faltar 1 un por arredondamento
             
+            st.divider()
             c1, c2, c3 = st.columns(3)
-            c1.metric("Alocar para ALIVVIA", f"{aloc_a} un", f"{p_a:.1%}")
-            c2.metric("Alocar para JCA", f"{aloc_j} un", f"{p_j:.1%}")
-            c3.metric("Total", f"{qtd_total} un")
+            c1.metric("ALIVVIA (Enviar)", f"{aloc_a} un", f"{p_a:.1%}")
+            c2.metric("JCA (Enviar)", f"{aloc_j} un", f"{p_j:.1%}")
+            c3.metric("Total Pedido", f"{qtd_total} un")
             
             
             
-            st.success(f"Cálculo feito: ALIVVIA vendeu {venda_a} e JCA vendeu {venda_j} nos últimos 60 dias.")
+            st.success(f"Histórico (Últimos 60 dias): ALIVVIA vendeu {venda_a} un | JCA vendeu {venda_j} un.")
         else:
-            st.error("Não foram encontradas vendas deste SKU para calcular a proporção.")
+            st.warning(f"O SKU {sku_selecionado} não possui histórico de vendas em nenhuma empresa para gerar proporção.")
