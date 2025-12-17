@@ -2,10 +2,9 @@ import pandas as pd
 import streamlit as st
 import io
 import numpy as np
-# Importa módulos auxiliares necessários
 from src import storage, utils 
 
-# --- FUNÇÕES DE LEITURA DO SUPABASE (AUDITADO PARA CSV) ---
+# --- FUNÇÕES DE LEITURA DO SUPABASE (AUDITADO FINALMENTE) ---
 
 def read_file_from_storage(empresa, tipo_arquivo):
     """Lê e processa arquivos XLSX ou CSV baixados do Supabase."""
@@ -29,16 +28,15 @@ def read_file_from_storage(empresa, tipo_arquivo):
 
     # --- Lógica de Leitura CSV (PARA EXT e FISICO) ---
     
-    # Tenta ler com separador PONTO-E-VÍRGULA (Padrão brasileiro, mais seguro)
+    # Tenta 1: Padrão Comma Separated (mais provável pelo seu anexo)
     try:
         content_io.seek(0) 
         df = pd.read_csv(
             content_io, 
             encoding='latin1', 
-            sep=';', 
-            decimal=',',
-            thousands='.', # NOVO: Ajuda a ler números como "1.701,65"
-            header=2, 
+            sep=',', 
+            header=2, # Cabeçalho na 3ª linha
+            engine='python', # Necessário para lidar com aspas complexas
             on_bad_lines='skip'
         )
         if df.shape[1] > 1 and 'SKU' in df.columns: 
@@ -46,17 +44,15 @@ def read_file_from_storage(empresa, tipo_arquivo):
     except:
         pass # Falha, tenta o próximo formato
         
-    # Tenta ler com separador VÍRGULA (Formato do snippet, requer engine='python')
+    # Tenta 2: Padrão Ponto-e-Vírgula (Padrão brasileiro tradicional)
     try:
         content_io.seek(0)
         df = pd.read_csv(
             content_io, 
             encoding='latin1', 
-            sep=',', 
-            decimal=',',
-            thousands='.', # NOVO
-            engine='python', # NOVO: Usa o engine Python para melhor leitura de aspas/delimitadores complexos
+            sep=';', 
             header=2,
+            engine='python', 
             on_bad_lines='skip'
         )
         if df.shape[1] > 1 and 'SKU' in df.columns: 
@@ -64,13 +60,12 @@ def read_file_from_storage(empresa, tipo_arquivo):
     except:
         pass # Falhou todos
         
-    # Último recurso se tudo falhar (Retorna o Erro Crítico)
+    # Último recurso se tudo falhar
     st.error(f"Erro Crítico: Falha ao ler arquivo {tipo_arquivo} (CSV). Verifique o formato.")
     return None
 
 
-# --- FUNÇÕES WRAPPER DE ACESSO AOS DADOS (USADAS PELO src/data.py) ---
-
+# --- FUNÇÕES WRAPPER DE ACESSO AOS DADOS (Mantenha o resto das funções aqui) ---
 @st.cache_data(ttl=600)
 def get_relatorio_full(empresa):
     return read_file_from_storage(empresa, "FULL")
@@ -89,7 +84,6 @@ def get_estoque_fisico(empresa):
 def calcular_reposicao(empresa, bases):
     """
     Função principal que orquestra a lógica de reposição.
-    Recebe o nome da empresa e o dicionário de bases completo.
     """
     df_kits = bases['catalogo_kits']
     df_catalogo_simples = bases['catalogo_simples']
@@ -106,33 +100,30 @@ def calcular_reposicao(empresa, bases):
     
     st.info("Explosão de kits e merges em andamento...")
     
-    # --- 1. EXPLOSÃO DE KITS (Lógica placeholder) ---
-    # Implementar a lógica real de explosão de kits se houver (Merge df_fisico com df_kits)
-    
     # 2. MERGE: Unir Estoque (FISICO) com Vendas (FULL) e Preços (CATALOGO)
-    
-    # Merge com o Full (para Vendas 60d, etc.)
     df_final = pd.merge(
         df_fisico, 
-        df_full[['sku', 'vendas_qtd_61d', 'vendas_valor_r$']], # Colunas do Full (devem ser normalizadas)
+        df_full[['sku', 'vendas_qtd_61d', 'vendas_valor_r$']], 
         on='sku', 
         how='left'
     )
     
-    # Merge com o Catálogo (para Preço de Custo)
     df_final = pd.merge(
         df_final, 
-        df_catalogo_simples[['sku', 'custo_medio']], # Colunas do Catálogo
+        df_catalogo_simples[['sku', 'custo_medio']], 
         on='sku', 
         how='left'
     )
     
     # 3. TRATAMENTO E CÁLCULO DE REPOSIÇÃO
     
-    df_final['Estoque_Fisico'] = df_final['estoque_atual'] # Ajuste de nome
+    df_final['Estoque_Fisico'] = df_final['estoque_atual']
     df_final['Vendas_60d'] = df_final['vendas_qtd_61d'].fillna(0)
+    
+    # --- PONTO CRÍTICO: CONVERSÃO NUMÉRICA AGORA É 100% MANUAL ---
     df_final['Preco_Custo'] = df_final['custo_medio'].apply(utils.br_to_float)
-    df_final['Vendas_60d'] = df_final['Vendas_60d'].astype(int)
+    df_final['Vendas_60d'] = df_final['Vendas_60d'].apply(lambda x: int(x) if pd.notna(x) else 0)
+
 
     # Lógica de falta (Exemplo)
     df_final['Faltam'] = np.where(
