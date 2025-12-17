@@ -8,7 +8,7 @@ import numpy as np
 st.set_page_config(page_title="Análise de Compra", layout="wide")
 st.title("📊 Painel de Reposição Integrado")
 
-# --- 1. CONFIGURAÇÃO ---
+# --- BARRA LATERAL ---
 with st.sidebar:
     st.header("⚙️ Parâmetros")
     dias_horizonte = st.number_input("Dias Cobertura", min_value=15, value=45, step=5)
@@ -16,17 +16,17 @@ with st.sidebar:
     lead_time = st.number_input("Lead Time (Dias)", min_value=0, value=0, step=1)
     
     st.divider()
-    if st.button("🔄 Recalcular", type="primary", use_container_width=True):
+    if st.button("🔄 Recalcular", type=\"primary\", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
-# --- 2. VERIFICAÇÃO ---
+# --- VERIFICAÇÃO ---
 dados_catalogo = st.session_state.get('catalogo_dados')
 if dados_catalogo is None:
     st.warning("⚠️ Catálogo não carregado. Carregue na Home.")
     st.stop()
 
-# --- 3. CÁLCULO ---
+# --- CÁLCULO ---
 @st.cache_data(ttl=600)
 def calcular_tudo(dias, cresc, lead):
     res = {}
@@ -47,7 +47,7 @@ if not resultados:
     st.error("Uploads pendentes na aba 1.")
     st.stop()
 
-# --- 4. FILTROS ---
+# --- FILTROS ---
 forns_a = resultados.get("ALIVVIA", pd.DataFrame())
 forns_j = resultados.get("JCA", pd.DataFrame())
 lista_a = forns_a['Fornecedor'].dropna().unique() if not forns_a.empty else []
@@ -58,9 +58,9 @@ c_filtro1, c_filtro2 = st.columns([1, 1])
 sel_fornecedor = c_filtro1.multiselect("Filtrar Fornecedor:", options=todos_fornecedores)
 busca_sku = c_filtro2.text_input("Buscar SKU:").upper()
 
-# --- 5. EXIBIÇÃO ---
+# --- EXIBIÇÃO POR EMPRESA ---
 def exibir_painel_empresa(nome_empresa, df_original, filtro_forn, filtro_sku):
-    st.markdown(f"---")
+    st.markdown("---")
     st.subheader(f"🏢 {nome_empresa}")
     
     df = df_original.copy()
@@ -71,24 +71,34 @@ def exibir_painel_empresa(nome_empresa, df_original, filtro_forn, filtro_sku):
         st.info("Sem dados.")
         return
 
-    # KPIs
+    # --- KPIs DE ESTOQUE (SEU PEDIDO) ---
+    # Calcula valores totais do dataframe filtrado
+    qtd_fisico = df['Estoque_Fisico'].sum()
+    val_fisico = (df['Estoque_Fisico'] * df['Preco_Custo']).sum()
+    
+    qtd_full = df['Estoque_Full'].sum()
+    val_full = (df['Estoque_Full'] * df['Preco_Custo']).sum()
+    
     sugestao_total = df['Valor_Compra'].sum()
-    pecas_comprar = df['Compra_Sugerida'].sum()
+
+    # Layout de Métricas
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Estoque Físico (Qtd)", f"{int(qtd_fisico):,}".replace(",", "."))
+    k2.metric("Estoque Físico (R$)", utils.format_br_currency(val_fisico))
+    k3.metric("Estoque Full (Qtd)", f"{int(qtd_full):,}".replace(",", "."))
+    k4.metric("Estoque Full (R$)", utils.format_br_currency(val_full))
+    k5.metric("Sugestão Compra (R$)", utils.format_br_currency(sugestao_total))
     
-    k1, k2 = st.columns(2)
-    k1.metric("Peças a Comprar", f"{int(pecas_comprar):,}".replace(",", "."))
-    k2.metric("Valor Sugerido (R$)", utils.format_br_currency(sugestao_total))
-    
-    # Tabela Limpa (SEM Coluna de Kit, mas COM Venda Shopee)
+    # --- TABELA ---
+    # Removemos a coluna 'Vendas_Via_Explosao' da visão para limpar, mas o valor está somado no Total
     colunas = [
         'SKU', 'Fornecedor', 
         'Estoque_Fisico', 'Estoque_Full', 
-        'Vendas_Full_60d', 'Vendas_Shopee_60d', # Separados como pediu
+        'Vendas_Full_60d', 'Vendas_Shopee_60d', 
         'Venda_Diaria',
         'Compra_Sugerida', 'Valor_Compra', 'Preco_Custo'
     ]
     
-    # Filtra apenas o que tem movimento
     df_view = df[(df['Estoque_Total'] > 0) | (df['Compra_Sugerida'] > 0) | (df['Vendas_Total_Global_60d'] > 0)]
     df_view = df_view.sort_values(['Valor_Compra', 'Fornecedor'], ascending=[False, True])
     
