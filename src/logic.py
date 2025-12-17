@@ -2,12 +2,12 @@ import pandas as pd
 import streamlit as st
 import io
 # Removido: import requests (pois a função de catálogo saiu daqui)
-from src import storage
+from src import storage # Assumindo que storage.py existe
 
 # --- FUNÇÕES DE LEITURA DO SUPABASE (MANTIDAS) ---
 
 def read_file_from_storage(empresa, tipo_arquivo):
-    # ... (O restante da função de leitura do Supabase que lida com CSV/XLSX)
+    """Lê e processa arquivos XLSX ou CSV baixados do Supabase."""
     path = f"{empresa}/{tipo_arquivo}.xlsx"
     content = storage.download(path)
     if content is None:
@@ -24,6 +24,7 @@ def read_file_from_storage(empresa, tipo_arquivo):
             return None
 
     # --- Lógica de Leitura CSV ---
+    # Tenta ler com separador PONTO-E-VÍRGULA e VÍRGULA para máxima compatibilidade
     try:
         content_io.seek(0) 
         df = pd.read_csv(content_io, encoding='latin1', sep=';', decimal=',', on_bad_lines='skip')
@@ -39,7 +40,7 @@ def read_file_from_storage(empresa, tipo_arquivo):
     st.error(f"Erro Crítico: Falha ao ler arquivo {tipo_arquivo} (CSV).")
     return None
 
-# --- FUNÇÕES WRAPPER DE ACESSO AOS DADOS ---
+# --- FUNÇÕES WRAPPER DE ACESSO AOS DADOS (USADAS PELO src/data.py) ---
 
 @st.cache_data(ttl=600)
 def get_relatorio_full(empresa):
@@ -53,22 +54,21 @@ def get_vendas_externas(empresa):
 def get_estoque_fisico(empresa):
     return read_file_from_storage(empresa, "FISICO")
 
-# --- FUNÇÃO PRINCIPAL DE CÁLCULO ---
+# --- FUNÇÃO PRINCIPAL DE CÁLCULO (USADA PELA PAGE 2) ---
 
 def calcular_reposicao(empresa):
     """
-    Função que será chamada pelo pages/2_📊_Analise_Compra.py
+    Função principal que orquestra a lógica de reposição.
     """
     df_full = get_relatorio_full(empresa)
     df_ext = get_vendas_externas(empresa)
     df_fisico = get_estoque_fisico(empresa)
     
-    # Pega o catálogo da memória (se o Home.py já o tiver carregado)
+    # Pega o catálogo da memória (carregado pela Home)
     dados_catalogo = st.session_state.get('catalogo_dados') 
 
     if df_full is None or df_ext is None or df_fisico is None or dados_catalogo is None:
-        # Não exibe erro aqui, pois a página 2 já faz a verificação.
-        return None
+        return None # A página 2 fará a verificação e exibirá o aviso.
 
     st.success("Arquivos base e Catálogo carregados com sucesso. Processando dados...")
     
