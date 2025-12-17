@@ -15,7 +15,7 @@ def read_file_from_storage(empresa, tipo_arquivo):
     content_io = io.BytesIO(content)
     try:
         if tipo_arquivo == "FULL":
-            # Mercado Livre Full
+            # Mercado Livre Full (pula 2 linhas de cabeçalho do ML)
             df = pd.read_excel(content_io, skiprows=2)
         else:
             # FISICO ou EXT (Shopee/Bling) - Suporta vírgula ou ponto-e-vírgula
@@ -38,36 +38,36 @@ def read_file_from_storage(empresa, tipo_arquivo):
         return None
 
 def calcular_reposicao(df_full, df_fisico, df_ext, df_kits, df_catalogo, empresa):
-    # Garante SKUs limpos
+    # Garante SKUs limpos para comparação
     df_full['sku'] = df_full['sku'].apply(utils.norm_sku)
     df_fisico['sku'] = df_fisico['sku'].apply(utils.norm_sku)
     df_kits['sku_kit'] = df_kits['sku_kit'].apply(utils.norm_sku)
     df_kits['sku_componente'] = df_kits['sku_componente'].apply(utils.norm_sku)
     
-    # Vendas ML
+    # 1. Consolidar Vendas Diretas (ML + Shopee)
     vendas = df_full[['sku', 'vendas_qtd']].copy()
-    
-    # Vendas Shopee (EXT)
     if df_ext is not None and 'vendas_qtd' in df_ext.columns:
         v_ext = df_ext[['sku', 'vendas_qtd']].copy()
         vendas = pd.concat([vendas, v_ext])
     
     vendas_agrupadas = vendas.groupby('sku')['vendas_qtd'].sum().reset_index()
 
-    # Explosão de Kits
-    v_kits = pd.merge(df_kits, vendas_agrupadas, left_on='sku_kit', right_on='sku', how='inner')
-    v_kits['v_expl'] = v_kits['vendas_qtd'] * v_kits['quantidade_no_kit']
-    v_expl_final = v_com_kits = v_kits.groupby('sku_componente')['v_expl'].sum().reset_index().rename(columns={'sku_componente': 'sku'})
+    # 2. Explosão de Kits
+    v_com_kits = pd.merge(df_kits, vendas_agrupadas, left_on='sku_kit', right_on='sku', how='inner')
+    v_com_kits['v_expl'] = v_com_kits['vendas_qtd'] * v_com_kits['quantidade_no_kit']
+    v_expl_final = v_com_kits.groupby('sku_componente')['v_expl'].sum().reset_index().rename(columns={'sku_componente': 'sku'})
 
-    # Cruzamento Final
+    # 3. Cruzamento Final (Base no Estoque Físico)
     df_res = pd.merge(df_fisico[['sku', 'estoque_atual']], vendas_agrupadas, on='sku', how='left').fillna(0)
     df_res = pd.merge(df_res, v_expl_final, on='sku', how='left').fillna(0)
+    
+    # Venda Total = Direta + vinda de Kits
     df_res['Vendas_Total_60d'] = df_res['vendas_qtd'] + df_res['v_expl']
     
-    # Custo e Fornecedor
+    # Traz Custo e Fornecedor do Catálogo
     df_res = pd.merge(df_res, df_catalogo[['sku', 'custo_medio', 'fornecedor']], on='sku', how='left')
     
-    # Resultados
+    # 4. Cálculos de Sugestão
     df_res['Compra_Sugerida'] = (df_res['Vendas_Total_60d'] - df_res['estoque_atual']).clip(lower=0)
     df_res['Preco_Custo'] = df_res['custo_medio'].apply(utils.br_to_float)
     df_res['Valor_Sugerido_R$'] = df_res['Compra_Sugerida'] * df_res['Preco_Custo']
