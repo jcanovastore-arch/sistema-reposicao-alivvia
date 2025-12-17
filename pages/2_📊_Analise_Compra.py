@@ -16,7 +16,8 @@ with st.sidebar:
     lead_time = st.number_input("Lead Time (Dias)", min_value=0, value=0, step=1)
     
     st.divider()
-    if st.button("🔄 Recalcular", type=\"primary\", use_container_width=True):
+    # CORREÇÃO AQUI: Removidas as barras invertidas que causavam o erro
+    if st.button("🔄 Recalcular", type="primary", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
@@ -71,8 +72,7 @@ def exibir_painel_empresa(nome_empresa, df_original, filtro_forn, filtro_sku):
         st.info("Sem dados.")
         return
 
-    # --- KPIs DE ESTOQUE (SEU PEDIDO) ---
-    # Calcula valores totais do dataframe filtrado
+    # --- KPIs DE ESTOQUE ---
     qtd_fisico = df['Estoque_Fisico'].sum()
     val_fisico = (df['Estoque_Fisico'] * df['Preco_Custo']).sum()
     
@@ -80,6 +80,7 @@ def exibir_painel_empresa(nome_empresa, df_original, filtro_forn, filtro_sku):
     val_full = (df['Estoque_Full'] * df['Preco_Custo']).sum()
     
     sugestao_total = df['Valor_Compra'].sum()
+    pecas_comprar = df['Compra_Sugerida'].sum()
 
     # Layout de Métricas
     k1, k2, k3, k4, k5 = st.columns(5)
@@ -90,7 +91,6 @@ def exibir_painel_empresa(nome_empresa, df_original, filtro_forn, filtro_sku):
     k5.metric("Sugestão Compra (R$)", utils.format_br_currency(sugestao_total))
     
     # --- TABELA ---
-    # Removemos a coluna 'Vendas_Via_Explosao' da visão para limpar, mas o valor está somado no Total
     colunas = [
         'SKU', 'Fornecedor', 
         'Estoque_Fisico', 'Estoque_Full', 
