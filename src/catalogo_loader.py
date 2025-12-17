@@ -8,11 +8,11 @@ URL_PADRAO = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_I
 
 def load_catalogo_padrao(url=URL_PADRAO):
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=15)
         response.raise_for_status()
         content = io.BytesIO(response.content)
         
-        # Lê as abas CATALOGO_SIMPLES e KITS
+        # Lê as abas conforme sua planilha
         df_catalogo = pd.read_excel(content, sheet_name="CATALOGO_SIMPLES")
         content.seek(0)
         df_kits = pd.read_excel(content, sheet_name="KITS")
@@ -20,25 +20,21 @@ def load_catalogo_padrao(url=URL_PADRAO):
         df_catalogo = utils.normalize_cols(df_catalogo)
         df_kits = utils.normalize_cols(df_kits)
         
-        # --- BUSCA AUTOMÁTICA DE COLUNAS NO CATÁLOGO ---
+        # --- MAPEAR COLUNAS DO CATÁLOGO ---
         for col in df_catalogo.columns:
-            if col in ['sku', 'codigo', 'cod', 'item', 'codigo_sku']:
+            if col in ['sku', 'kit_sku', 'codigo', 'cod', 'item']:
                 df_catalogo.rename(columns={col: 'sku'}, inplace=True)
                 break
         
-        # --- BUSCA AUTOMÁTICA DE COLUNAS NOS KITS (Resolve o KeyError) ---
-        for col in df_kits.columns:
-            # Procura coluna do Kit
-            if col in ['sku_kit', 'kit', 'sku_pai', 'pai']:
-                df_kits.rename(columns={col: 'sku_kit'}, inplace=True)
-            # Procura coluna do Componente
-            if col in ['sku_componente', 'componente', 'item_filho', 'filho', 'sku_item']:
-                df_kits.rename(columns={col: 'sku_componente'}, inplace=True)
-            # Procura coluna da Quantidade
-            if col in ['quantidade_componente', 'quantidade', 'qtde', 'qtd']:
-                df_kits.rename(columns={col: 'quantidade_componente'}, inplace=True)
+        # --- MAPEAR COLUNAS DOS KITS (Baseado no seu arquivo enviado) ---
+        mapeamento_kits = {
+            'kit_sku': 'sku_kit',
+            'component_sku': 'sku_componente',
+            'qty_por_kit': 'quantidade_componente'
+        }
+        df_kits.rename(columns=mapeamento_kits, inplace=True)
 
-        # Padroniza SKUs
+        # Padronização de SKUs (Maiúsculo e limpo)
         if 'sku' in df_catalogo.columns:
             df_catalogo['sku'] = df_catalogo['sku'].apply(utils.norm_sku)
         if 'sku_kit' in df_kits.columns:
@@ -48,5 +44,5 @@ def load_catalogo_padrao(url=URL_PADRAO):
             
         return {"catalogo": df_catalogo, "kits": df_kits}
     except Exception as e:
-        st.error(f"Erro ao carregar Drive: {e}")
+        st.error(f"Erro ao acessar Drive: {e}")
         return None
