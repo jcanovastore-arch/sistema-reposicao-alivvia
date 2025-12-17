@@ -5,13 +5,17 @@ from src import storage
 st.set_page_config(page_title="Uploads", layout="wide")
 st.title("☁️ Gerenciador de Arquivos")
 
+# --- CORREÇÃO DO LOOP: Inicializa um contador na session_state ---
+# O contador será usado para forçar a limpeza do widget de upload após o sucesso.
+if 'upload_counter' not in st.session_state:
+    st.session_state['upload_counter'] = 0
+
 col_alivvia, col_jca = st.columns(2)
 
 def render_file_slot(empresa, label_amigavel, tipo_arquivo):
     """
     Cria um bloco visual para gerenciar um único arquivo.
     """
-    # Caminho exato no Supabase (padronizado para .xlsx)
     path_cloud = f"{empresa}/{tipo_arquivo}.xlsx"
     
     st.markdown(f"**{label_amigavel}**")
@@ -20,7 +24,6 @@ def render_file_slot(empresa, label_amigavel, tipo_arquivo):
     existe = storage.file_exists(path_cloud)
     
     if existe:
-        # Se existe, mostra caixa verde com botão de excluir
         c1, c2 = st.columns([0.8, 0.2])
         c1.success("✅ Arquivo Salvo na Nuvem")
         
@@ -31,29 +34,33 @@ def render_file_slot(empresa, label_amigavel, tipo_arquivo):
                 time.sleep(1)
                 st.rerun()
             else:
-                st.error("Erro ao deletar o arquivo. Verifique as permissões de DELETE.")
+                st.error("Erro ao deletar o arquivo.")
     else:
-        # Se não existe, mostra aviso amarelo
         st.warning("⚠️ Pendente de envio")
 
-    # 2. Área de Upload (Sempre visível para permitir sobrescrever)
+    # 2. Área de Upload 
+    # Usamos o contador na key para que o widget seja 'novo' e vazio após o rerun
     arquivo = st.file_uploader(
         f"Enviar {label_amigavel}", 
-        type=["xlsx", "csv"], # <--- ACEITA XLSX E CSV (Correção final do uploader)
-        key=f"up_{path_cloud}",
+        type=["xlsx", "csv"], 
+        # --- AQUI ESTÁ A CORREÇÃO DO LOOP ---
+        key=f"up_{path_cloud}_{st.session_state['upload_counter']}",
         label_visibility="collapsed"
     )
     
-    # 3. Lógica de Envio (COM A PAUSA PARA EVITAR LOOP)
+    # 3. Lógica de Envio 
     if arquivo:
         with st.spinner("Enviando para o Supabase..."):
             if storage.upload(arquivo, path_cloud):
                 st.success("Upload concluído!")
-                # PAUSA CRÍTICA DE 1 SEGUNDO PARA EVITAR O LOOP INFINITO
-                time.sleep(1) 
-                st.rerun() # Recarrega para atualizar o status visual para "Salvo na Nuvem"
+                
+                # --- MUDANÇA FINAL CONTRA O LOOP: Incrementa o contador ---
+                # Isso muda a chave do uploader e o limpa no próximo rerun.
+                st.session_state['upload_counter'] += 1 
+                time.sleep(1)
+                st.rerun() 
             else:
-                st.error("Erro ao enviar. Tente novamente ou verifique as permissões de INSERT.")
+                st.error("Erro ao enviar. Tente novamente.")
     
     st.divider()
 
