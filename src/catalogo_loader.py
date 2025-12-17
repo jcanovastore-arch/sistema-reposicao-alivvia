@@ -12,7 +12,7 @@ def load_catalogo_padrao(url=URL_PADRAO):
         response.raise_for_status()
         content = io.BytesIO(response.content)
         
-        # Lê as abas conforme sua planilha
+        # Lê as abas CATALOGO_SIMPLES e KITS
         df_catalogo = pd.read_excel(content, sheet_name="CATALOGO_SIMPLES")
         content.seek(0)
         df_kits = pd.read_excel(content, sheet_name="KITS")
@@ -20,13 +20,13 @@ def load_catalogo_padrao(url=URL_PADRAO):
         df_catalogo = utils.normalize_cols(df_catalogo)
         df_kits = utils.normalize_cols(df_kits)
         
-        # --- MAPEAR COLUNAS DO CATÁLOGO ---
+        # --- BUSCA INTELIGENTE DE SKU NO CATÁLOGO ---
         for col in df_catalogo.columns:
-            if col in ['sku', 'kit_sku', 'codigo', 'cod', 'item']:
+            if col in ['sku', 'kit_sku', 'codigo', 'cod', 'item', 'codigo_sku']:
                 df_catalogo.rename(columns={col: 'sku'}, inplace=True)
                 break
         
-        # --- MAPEAR COLUNAS DOS KITS (Baseado no seu arquivo enviado) ---
+        # --- MAPEAR COLUNAS DOS KITS (Conforme seu arquivo enviado) ---
         mapeamento_kits = {
             'kit_sku': 'sku_kit',
             'component_sku': 'sku_componente',
@@ -34,9 +34,12 @@ def load_catalogo_padrao(url=URL_PADRAO):
         }
         df_kits.rename(columns=mapeamento_kits, inplace=True)
 
-        # Padronização de SKUs (Maiúsculo e limpo)
-        if 'sku' in df_catalogo.columns:
-            df_catalogo['sku'] = df_catalogo['sku'].apply(utils.norm_sku)
+        # Força a existência da coluna 'sku' se nada foi encontrado
+        if 'sku' not in df_catalogo.columns:
+            df_catalogo.rename(columns={df_catalogo.columns[0]: 'sku'}, inplace=True)
+
+        # Padronização final
+        df_catalogo['sku'] = df_catalogo['sku'].apply(utils.norm_sku)
         if 'sku_kit' in df_kits.columns:
             df_kits['sku_kit'] = df_kits['sku_kit'].apply(utils.norm_sku)
         if 'sku_componente' in df_kits.columns:
@@ -44,5 +47,5 @@ def load_catalogo_padrao(url=URL_PADRAO):
             
         return {"catalogo": df_catalogo, "kits": df_kits}
     except Exception as e:
-        st.error(f"Erro ao acessar Drive: {e}")
+        st.error(f"Erro ao carregar Drive: {e}")
         return None
