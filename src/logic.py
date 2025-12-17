@@ -19,19 +19,22 @@ def read_file_from_storage(empresa, tipo_arquivo):
             # ML Full sempre pula 2 linhas
             df = pd.read_excel(content_io, skiprows=2)
         else:
-            # Tenta ler CSV com os separadores comuns no Brasil
+            # Tenta ler CSV com detecção de separador
             try:
                 content_io.seek(0)
-                df = pd.read_csv(content_io, encoding='latin1', sep=',')
+                # Tenta vírgula (Padrão Shopee/Bling)
+                df = pd.read_csv(content_io, encoding='latin1', sep=',', quotechar='"')
+                if len(df.columns) <= 1: raise Exception("Incorreto")
             except:
                 content_io.seek(0)
-                df = pd.read_csv(content_io, encoding='utf-8', sep=';')
+                # Tenta ponto-e-vírgula (Padrão Excel Brasil)
+                df = pd.read_csv(content_io, encoding='latin1', sep=';', quotechar='"')
         
         df = utils.normalize_cols(df)
         
-        # Validação Crítica: Se não achou a coluna SKU, o sistema não pode continuar
+        # Se mesmo assim não achar o SKU, mostra as colunas encontradas para diagnóstico
         if 'sku' not in df.columns:
-            st.error(f"ERRO: Não foi possível encontrar a coluna de SKU no arquivo {tipo_arquivo} da {empresa}. Verifique o formato.")
+            st.error(f"⚠️ Erro no arquivo {tipo_arquivo} ({empresa}). Colunas lidas: {list(df.columns)}")
             return None
             
         return df
@@ -40,35 +43,31 @@ def read_file_from_storage(empresa, tipo_arquivo):
         return None
 
 def calcular_reposicao(df_full, df_fisico, df_ext, df_kits, df_catalogo, empresa):
-    # 1. Normalização de dados
-    for d in [df_full, df_fisico, df_kits]:
-        if 'sku' in d.columns: d['sku'] = d['sku'].apply(utils.norm_sku)
-    
+    # 1. Normalização
+    df_full['sku'] = df_full['sku'].apply(utils.norm_sku)
+    df_fisico['sku'] = df_fisico['sku'].apply(utils.norm_sku)
     df_kits['sku_kit'] = df_kits['sku_kit'].apply(utils.norm_sku)
     df_kits['sku_componente'] = df_kits['sku_componente'].apply(utils.norm_sku)
     
-    # 2. Vendas ML
+    # 2. Vendas
     vendas = df_full[['sku', 'vendas_qtd']].copy()
-    
-    # 3. Vendas Externas (Shopee)
     if df_ext is not None and 'vendas_qtd' in df_ext.columns:
         v_ext = df_ext[['sku', 'vendas_qtd']].copy()
         vendas = pd.concat([vendas, v_ext])
     
     vendas_totais = vendas.groupby('sku')['vendas_qtd'].sum().reset_index()
 
-    # 4. Explosão de Kits
+    # 3. Explosão de Kits
     v_kits = pd.merge(df_kits, vendas_totais, left_on='sku_kit', right_on='sku', how='inner')
     v_kits['v_expl'] = v_kits['vendas_qtd'] * v_kits['quantidade_no_kit']
     v_expl_agrupada = v_kits.groupby('sku_componente')['v_expl'].sum().reset_index().rename(columns={'sku_componente': 'sku'})
 
-    # 5. Cruzamento Final
+    # 4. Merge Final
     df_final = pd.merge(df_fisico[['sku', 'estoque_atual']], vendas_totais, on='sku', how='left').fillna(0)
     df_final = pd.merge(df_final, v_expl_agrupada, on='sku', how='left').fillna(0)
-    
     df_final['Vendas_Total_60d'] = df_final['vendas_qtd'] + df_final['v_expl']
     
-    # Traz custo e fornecedor do catálogo
+    # Traz custo e fornecedor
     df_final = pd.merge(df_final, df_catalogo[['sku', 'custo_medio', 'fornecedor']], on='sku', how='left')
     
     df_final['Compra_Sugerida'] = (df_final['Vendas_Total_60d'] - df_final['estoque_atual']).clip(lower=0)
