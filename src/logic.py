@@ -15,14 +15,14 @@ def read_file_from_storage(empresa, tipo_arquivo):
     content_io = io.BytesIO(content)
     try:
         df = None
-        # Define quantas linhas pular (FULL tem 2 linhas de cabeçalho inútil)
+        # Pula 2 linhas se for FULL (padrão ML)
         skip = 2 if tipo_arquivo == "FULL" else 0
         
         # Tenta ler como Excel
         try:
             df = pd.read_excel(content_io, skiprows=skip)
         except:
-            # Tenta ler como CSV (Seu caso atual)
+            # Tenta ler como CSV
             content_io.seek(0)
             try:
                 df = pd.read_csv(content_io, encoding='utf-8-sig', sep=',', quotechar='"', skiprows=skip)
@@ -31,13 +31,13 @@ def read_file_from_storage(empresa, tipo_arquivo):
                 content_io.seek(0)
                 df = pd.read_csv(content_io, encoding='latin1', sep=';', quotechar='"', skiprows=skip)
 
-        # Normaliza
         df = utils.normalize_cols(df)
         
-        # --- BLINDAGEM CONTRA ERROS ---
-        # Se normalizou errado, força o nome certo
-        if 'vendas_qtd_61d' in df.columns:
-            df.rename(columns={'vendas_qtd_61d': 'vendas_qtd'}, inplace=True)
+        # CORREÇÕES DE NOME (BLINDAGEM)
+        if 'vendas_qtd_61d' in df.columns: df.rename(columns={'vendas_qtd_61d': 'vendas_qtd'}, inplace=True)
+        if 'id_produto' in df.columns and 'sku' not in df.columns: 
+             # Às vezes o ID vira SKU se não tiver outro
+             pass 
 
         if 'sku' not in df.columns:
             if 'codigo_sku' in df.columns: df.rename(columns={'codigo_sku': 'sku'}, inplace=True)
@@ -60,7 +60,19 @@ def calcular_reposicao(df_full, df_fisico, df_ext, df_kits, df_catalogo, empresa
     df_fisico['sku'] = df_fisico['sku'].apply(utils.norm_sku)
     df_kits['sku_kit'] = df_kits['sku_kit'].apply(utils.norm_sku)
     df_kits['sku_componente'] = df_kits['sku_componente'].apply(utils.norm_sku)
+    df_catalogo['sku'] = df_catalogo['sku'].apply(utils.norm_sku)
     
+    # --- AUTO-CORREÇÃO DE EMERGÊNCIA (AQUI RESOLVE SEU PROBLEMA) ---
+    # Se o catálogo veio velho da memória e sem colunas, criamos elas AGORA.
+    if 'custo_medio' not in df_catalogo.columns:
+        df_catalogo['custo_medio'] = 0.0
+    
+    if 'fornecedor' not in df_catalogo.columns:
+        df_catalogo['fornecedor'] = "GERAL"
+        
+    # Garante que não tem duplicatas no catálogo para não explodir o merge
+    df_catalogo = df_catalogo.drop_duplicates(subset=['sku'])
+
     # 1. Vendas
     vendas = df_full[['sku', 'vendas_qtd']].copy()
     if df_ext is not None and 'vendas_qtd' in df_ext.columns:
@@ -79,9 +91,13 @@ def calcular_reposicao(df_full, df_fisico, df_ext, df_kits, df_catalogo, empresa
     df_res = pd.merge(df_res, v_expl_final, on='sku', how='left').fillna(0)
     df_res['Vendas_Total_60d'] = df_res['vendas_qtd'] + df_res['v_expl']
     
-    # Custo
+    # Custo (Agora seguro porque garantimos as colunas acima)
     df_res = pd.merge(df_res, df_catalogo[['sku', 'custo_medio', 'fornecedor']], on='sku', how='left')
     
+    # Preenche vazios caso o SKU não esteja no catálogo
+    df_res['fornecedor'] = df_res['fornecedor'].fillna("GERAL")
+    df_res['custo_medio'] = df_res['custo_medio'].fillna(0.0)
+
     # Resultado
     df_res['Compra_Sugerida'] = (df_res['Vendas_Total_60d'] - df_res['estoque_atual']).clip(lower=0)
     df_res['Preco_Custo'] = df_res['custo_medio'].apply(utils.br_to_float)
