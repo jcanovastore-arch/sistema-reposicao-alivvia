@@ -12,37 +12,33 @@ def load_catalogo_padrao(url=URL_PADRAO):
         response.raise_for_status()
         content = io.BytesIO(response.content)
         
-        # Lê as abas
+        # Lê as abas CATALOGO_SIMPLES e KITS
         df_catalogo = pd.read_excel(content, sheet_name="CATALOGO_SIMPLES")
         content.seek(0)
         df_kits = pd.read_excel(content, sheet_name="KITS")
         
-        # Normaliza cabeçalhos (congelado)
         df_catalogo = utils.normalize_cols(df_catalogo)
         df_kits = utils.normalize_cols(df_kits)
         
-        # --- BUSCA AGRESSIVA PELO SKU NO CATÁLOGO ---
-        # Procura nomes comuns e renomeia para 'sku'
+        # --- MAPEAR COLUNAS DO CATÁLOGO (Aba CATALOGO_SIMPLES) ---
         achou_sku = False
         for col in df_catalogo.columns:
-            if col in ['sku', 'kit_sku', 'codigo', 'cod', 'item', 'codigo_sku']:
+            if col in ['sku', 'kit_sku', 'codigo', 'cod', 'item', 'referencia']:
                 df_catalogo.rename(columns={col: 'sku'}, inplace=True)
                 achou_sku = True
                 break
-        
-        # Se não achou por nome, força a PRIMEIRA coluna a ser o SKU
         if not achou_sku:
             df_catalogo.rename(columns={df_catalogo.columns[0]: 'sku'}, inplace=True)
 
-        # --- MAPEAR COLUNAS DOS KITS (Baseado no seu arquivo enviado) ---
-        mapeamento_kits = {
+        # --- MAPEAR COLUNAS DOS KITS (Baseado no seu ficheiro) ---
+        # kit_sku -> sku_kit | component_sku -> sku_componente | qty_por_kit -> quantidade_componente
+        df_kits.rename(columns={
             'kit_sku': 'sku_kit',
             'component_sku': 'sku_componente',
             'qty_por_kit': 'quantidade_componente'
-        }
-        df_kits.rename(columns=mapeamento_kits, inplace=True)
+        }, inplace=True)
 
-        # Padronização final (Maiúsculo e Limpo)
+        # Limpeza e Padronização
         df_catalogo['sku'] = df_catalogo['sku'].astype(str).apply(utils.norm_sku)
         if 'sku_kit' in df_kits.columns:
             df_kits['sku_kit'] = df_kits['sku_kit'].astype(str).apply(utils.norm_sku)
@@ -51,5 +47,5 @@ def load_catalogo_padrao(url=URL_PADRAO):
             
         return {"catalogo": df_catalogo, "kits": df_kits}
     except Exception as e:
-        st.error(f"Erro crítico ao ler Drive: {e}")
+        st.error(f"Erro ao carregar Drive: {e}")
         return None
