@@ -14,7 +14,6 @@ def read_file_from_storage(empresa, tipo_arquivo):
     if content is None: return None
     
     content_io = io.BytesIO(content)
-    # Pula 2 linhas apenas no FULL do Mercado Livre
     skip = 2 if tipo_arquivo == "FULL" else 0
     
     try:
@@ -24,67 +23,82 @@ def read_file_from_storage(empresa, tipo_arquivo):
             content_io.seek(0)
             df = pd.read_csv(content_io, skiprows=skip, sep=None, engine='python', encoding='utf-8-sig')
         
-        return utils.normalize_cols(df)
-    except Exception as e:
+        df = utils.normalize_cols(df)
+        # GARANTE QUE A COLUNA SKU EXISTA E ESTEJA EM MAIÚSCULO
+        if 'sku' in df.columns:
+            df['sku'] = df['sku'].apply(utils.norm_sku)
+        return df
+    except:
         return None
 
 def calcular_reposicao(empresa, dias_cobertura, crescimento=0, lead_time=0):
-    # 1. Carregar Bases do Storage
-    df_full = get_relatorio_full(empresa)
-    df_ext = get_vendas_externas(empresa)
-    df_fisico = get_estoque_fisico(empresa)
+    # 1. Carregar Bases Reais
+    df_full = get_relatorio_full(empresa)      
+    df_ext = get_vendas_externas(empresa)      
+    df_fisico = get_estoque_fisico(empresa)    
     
-    # Busca Catálogo do Session State
     dados_cat = st.session_state.get('catalogo_dados')
     if not dados_cat: return None
     df_catalogo = dados_cat['catalogo']
 
-    # 2. Tratamento Estoque Físico e Custo (Jaca-Estoque)
+    # 2. Tratamento Estoque Físico e Custo (Jaca - Estoque)
     if df_fisico is not None:
-        # 'estoque_atual' e 'preco' são os nomes normalizados pelo utils.py
         df_fisico['estoque_fisico'] = df_fisico['estoque_atual'].apply(utils.br_to_float).fillna(0)
         df_fisico['custo_unit'] = df_fisico['preco'].apply(utils.br_to_float).fillna(0)
-        estoque_real = df_fisico.groupby('codigo_sku').agg({'estoque_fisico': 'sum', 'custo_unit': 'max'}).reset_index().rename(columns={'codigo_sku': 'sku'})
+        estoque_real = df_fisico.groupby('sku').agg({
+            'estoque_fisico': 'sum',
+            'custo_unit': 'max'
+        }).reset_index()
     else:
         estoque_real = pd.DataFrame(columns=['sku', 'estoque_fisico', 'custo_unit'])
 
-    # 3. Tratamento Vendas Full (Mercado Livre)
+    # 3. Tratamento Vendas Full (ML)
     if df_full is not None:
-        df_full['vendas_full_60d'] = df_full['vendas_qtd_61d'].apply(utils.br_to_float).fillna(0)
-        df_full['estoque_full'] = df_full['estoque_atual'].apply(utils.br_to_float).fillna(0)
-        v_full = df_full.groupby('sku').agg({'vendas_full_60d': 'sum', 'estoque_full': 'sum'}).reset_index()
+        df_full['v_full'] = df_full['vendas_qtd_61d'].apply(utils.br_to_float).fillna(0)
+        df_full['e_full'] = df_full['estoque_atual'].apply(utils.br_to_float).fillna(0)
+        vendas_full = df_full.groupby('sku').agg({'v_full': 'sum', 'e_full': 'sum'}).reset_index()
     else:
-        v_full = pd.DataFrame(columns=['sku', 'vendas_full_60d', 'estoque_full'])
+        vendas_full = pd.DataFrame(columns=['sku', 'v_full', 'e_full'])
 
-    # 4. Tratamento Vendas Shopee (EXT)
+    # 4. Tratamento Vendas Shopee (EXT) - CORRIGIDO
     if df_ext is not None:
-        # 'qtde_vendas' é o nome que o utils.py dá para 'Qtde. Vendas'
-        df_ext['vendas_shopee_60d'] = df_ext['qtde_vendas'].apply(utils.br_to_float).fillna(0)
-        v_ext = df_ext.groupby('sku').agg({'vendas_shopee_60d': 'sum'}).reset_index()
+        # Pega a coluna 'qtde_vendas' (que é o 'Qtde. Vendas' normalizado)
+        df_ext['v_shopee'] = df_ext['qtde_vendas'].apply(utils.br_to_float).fillna(0)
+        vendas_shopee = df_ext.groupby('sku').agg({'v_shopee': 'sum'}).reset_index()
     else:
-        v_ext = pd.DataFrame(columns=['sku', 'vendas_shopee_60d'])
+        vendas_shopee = pd.DataFrame(columns=['sku', 'v_shopee'])
 
-    # 5. Cruzamento Final
+    # 5. MERGE FINAL (Base no Catálogo)
     df_res = df_catalogo[['sku', 'fornecedor']].copy()
     df_res['sku'] = df_res['sku'].apply(utils.norm_sku)
 
     df_res = pd.merge(df_res, estoque_real, on='sku', how='left')
-    df_res = pd.merge(df_res, v_full, on='sku', how='left')
-    df_res = pd.merge(df_res, v_ext, on='sku', how='left')
+    df_res = pd.merge(df_res, vendas_full, on='sku', how='left')
+    df_res = pd.merge(df_res, vendas_shopee, on='sku', how='left')
+    
     df_res.fillna(0, inplace=True)
 
-    # 6. Cálculos
-    df_res['Vendas_Total_60d'] = df_res['vendas_full_60d'] + df_res['vendas_shopee_60d']
+    # 6. Lógica de Cálculo
+    df_res['Vendas_Total_60d'] = df_res['v_full'] + df_res['v_shopee']
     df_res['Venda_Diaria'] = (df_res['Vendas_Total_60d'] * (1 + (crescimento/100))) / 60
-    df_res['Estoque_Total'] = df_res['estoque_fisico'] + df_res['estoque_full']
+    df_res['Estoque_Total'] = df_res['estoque_fisico'] + df_res['e_full']
     
+    # Compra Sugerida
     df_res['Compra_Sugerida'] = (df_res['Venda_Diaria'] * (dias_cobertura + lead_time)) - df_res['Estoque_Total']
     df_res['Compra_Sugerida'] = df_res['Compra_Sugerida'].apply(lambda x: int(np.ceil(x)) if x > 0 else 0)
+    
+    # Valor Total
     df_res['Valor_Compra'] = df_res['Compra_Sugerida'] * df_res['custo_unit']
 
-    # Renomear para a Interface
+    # Mapeamento para os nomes exatos pedidos
     return df_res.rename(columns={
-        'sku': 'SKU', 'fornecedor': 'Fornecedor', 'estoque_fisico': 'Estoque_Fisico',
-        'estoque_full': 'Estoque_Full', 'vendas_full_60d': 'Vendas_Full_60d',
-        'vendas_shopee_60d': 'Vendas_Shopee_60d', 'custo_unit': 'Preco_Custo'
+        'sku': 'SKU',
+        'fornecedor': 'Fornecedor',
+        'custo_unit': 'Preço de custo',
+        'v_full': 'Vendas full',
+        'v_shopee': 'vendas Shopee',
+        'e_full': 'Estoque full',
+        'estoque_fisico': 'Estoque fisico',
+        'Compra_Sugerida': 'Compra sugerida',
+        'Valor_Compra': 'Valor total da compra sugerida'
     })
