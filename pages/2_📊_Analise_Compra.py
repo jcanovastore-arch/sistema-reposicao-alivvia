@@ -5,10 +5,12 @@ from src.logic import calcular_reposicao
 st.set_page_config(page_title="Análise de Compra", layout="wide")
 st.title("📊 Painel de Compras Integrado")
 
+# Trava para garantir que a carga foi feita na Home
 if not st.session_state.get('catalogo_carregado'):
-    st.error("⚠️ O Catálogo não foi carregado. Volte à Home e clique em 'Carregar Padrão'.")
+    st.error("⚠️ Catálogo não carregado. Volte à Home e clique em 'Carregar Padrão KITS/CATALOGO'.")
     st.stop()
 
+# --- SIDEBAR: PARÂMETROS E FILTROS ---
 with st.sidebar:
     st.header("⚙️ Parâmetros")
     dias_h = st.number_input("Dias Cobertura", min_value=15, value=45, step=5)
@@ -17,7 +19,7 @@ with st.sidebar:
     
     st.divider()
     st.header("🔍 Filtros Globais")
-    f_sku = st.text_input("Filtrar SKU (Global)").strip().upper()
+    f_sku = st.text_input("Filtrar SKU").strip().upper()
     
     if st.button("🔄 Recalcular Tudo", type="primary", use_container_width=True):
         st.cache_data.clear()
@@ -32,6 +34,7 @@ def carregar_resultados(d, c, l):
 
 resultados = carregar_resultados(dias_h, cresc, lead)
 
+# Colunas exigidas por você (9 colunas de dados + 2 de valoração)
 colunas_exigidas = [
     "SKU", "Fornecedor", "Preço de custo", 
     "Vendas full", "vendas Shopee", 
@@ -40,6 +43,7 @@ colunas_exigidas = [
     "Compra sugerida", "Valor total da compra sugerida"
 ]
 
+# Captura fornecedores de todas as empresas para o filtro global
 todos_forn = []
 for df_temp in resultados.values():
     if df_temp is not None and not df_temp.empty:
@@ -49,15 +53,37 @@ lista_forn_global = sorted([str(x) for x in set(todos_forn) if str(x) not in ["0
 with st.sidebar:
     sel_forn_global = st.multiselect("Filtrar Fornecedor (Global)", lista_forn_global)
 
+# --- EXIBIÇÃO DAS EMPRESAS ---
 for emp in ["ALIVVIA", "JCA"]:
     df = resultados.get(emp)
+    
     if df is not None and not df.empty:
         st.subheader(f"🏢 Empresa: {emp}")
+        
+        # Aplicar Filtros Globais
         if f_sku:
             df = df[df['SKU'].str.contains(f_sku, na=False)]
         if sel_forn_global:
             df = df[df['Fornecedor'].isin(sel_forn_global)]
 
+        # Seleção e Ordenação
         df_final = df[colunas_exigidas].sort_values("Compra sugerida", ascending=False)
-        st.dataframe(df_final, use_container_width=True, hide_index=True)
+        
+        st.dataframe(
+            df_final,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Preço de custo": st.column_config.NumberColumn(format="R$ %.2f"),
+                "Valor Estoque Full": st.column_config.NumberColumn(format="R$ %.2f"),
+                "Valor Estoque Fisico": st.column_config.NumberColumn(format="R$ %.2f"),
+                "Valor total da compra sugerida": st.column_config.NumberColumn(format="R$ %.2f")
+            }
+        )
+        
+        # Totais por Empresa
+        c1, c2, c3 = st.columns(3)
+        c1.metric(f"💰 Estoque Full {emp}", f"R$ {df_final['Valor Estoque Full'].sum():,.2f}")
+        c2.metric(f"💰 Estoque Físico {emp}", f"R$ {df_final['Valor Estoque Fisico'].sum():,.2f}")
+        c3.metric(f"🛒 Sugestão Compra {emp}", f"R$ {df_final['Valor total da compra sugerida'].sum():,.2f}")
         st.divider()
