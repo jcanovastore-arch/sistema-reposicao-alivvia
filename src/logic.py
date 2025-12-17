@@ -2,27 +2,34 @@ import pandas as pd
 import streamlit as st
 import io
 import numpy as np
-from src import storage, utils # utils deve ter normalize_cols e br_to_float
+# Importa módulos auxiliares necessários
+from src import storage, utils 
 
-# --- FUNÇÕES DE LEITURA DO SUPABASE (Com correção de header=2 para CSV) ---
+# --- FUNÇÕES DE LEITURA DO SUPABASE (AUDITADO PARA CSV) ---
 
 def read_file_from_storage(empresa, tipo_arquivo):
     """Lê e processa arquivos XLSX ou CSV baixados do Supabase."""
     path = f"{empresa}/{tipo_arquivo}.xlsx"
+    
+    # Simula o download. Se o seu storage.py estiver ok, esta linha funciona.
     content = storage.download(path)
     if content is None:
+        st.warning(f"Arquivo {tipo_arquivo} da {empresa} não encontrado ou vazio.")
         return None
 
     is_csv_slot = tipo_arquivo.upper() in ["EXT", "FISICO"] 
     content_io = io.BytesIO(content)
 
     if not is_csv_slot:
+        # Leitura de XLSX (para o FULL)
         try:
-            return pd.read_excel(content_io)
+            return utils.normalize_cols(pd.read_excel(content_io))
         except Exception:
             return None
 
-    # --- Lógica de Leitura CSV ---
+    # --- Lógica de Leitura CSV (PARA EXT e FISICO) ---
+    
+    # Tenta ler com separador PONTO-E-VÍRGULA (Padrão brasileiro, mais seguro)
     try:
         content_io.seek(0) 
         df = pd.read_csv(
@@ -30,34 +37,39 @@ def read_file_from_storage(empresa, tipo_arquivo):
             encoding='latin1', 
             sep=';', 
             decimal=',',
-            header=2, # <-- CORREÇÃO: CABEÇALHO NA 3ª LINHA
+            thousands='.', # NOVO: Ajuda a ler números como "1.701,65"
+            header=2, 
             on_bad_lines='skip'
         )
         if df.shape[1] > 1 and 'SKU' in df.columns: 
             return utils.normalize_cols(df)
     except:
-        pass
+        pass # Falha, tenta o próximo formato
         
+    # Tenta ler com separador VÍRGULA (Formato do snippet, requer engine='python')
     try:
         content_io.seek(0)
         df = pd.read_csv(
             content_io, 
             encoding='latin1', 
             sep=',', 
-            decimal='.',
-            header=2, # <-- CORREÇÃO: CABEÇALHO NA 3ª LINHA
+            decimal=',',
+            thousands='.', # NOVO
+            engine='python', # NOVO: Usa o engine Python para melhor leitura de aspas/delimitadores complexos
+            header=2,
             on_bad_lines='skip'
         )
         if df.shape[1] > 1 and 'SKU' in df.columns: 
             return utils.normalize_cols(df)
     except:
-        pass
-
-    st.warning(f"Erro Crítico: Falha ao ler arquivo {tipo_arquivo} (CSV). Verifique o formato.")
+        pass # Falhou todos
+        
+    # Último recurso se tudo falhar (Retorna o Erro Crítico)
+    st.error(f"Erro Crítico: Falha ao ler arquivo {tipo_arquivo} (CSV). Verifique o formato.")
     return None
 
 
-# --- FUNÇÕES WRAPPER DE ACESSO AOS DADOS ---
+# --- FUNÇÕES WRAPPER DE ACESSO AOS DADOS (USADAS PELO src/data.py) ---
 
 @st.cache_data(ttl=600)
 def get_relatorio_full(empresa):
@@ -72,7 +84,7 @@ def get_estoque_fisico(empresa):
     return read_file_from_storage(empresa, "FISICO")
 
 
-# --- FUNÇÃO PRINCIPAL DE CÁLCULO (ASSINATURA SIMPLIFICADA) ---
+# --- FUNÇÃO PRINCIPAL DE CÁLCULO (A LÓGICA DE COMPRA) ---
 
 def calcular_reposicao(empresa, bases):
     """
@@ -84,31 +96,43 @@ def calcular_reposicao(empresa, bases):
     df_full = bases['df_full']
     df_fisico = bases['df_fisico']
     
-    # 1. EXPLOSÃO DE KITS (Lógica placeholder, mas funcional)
-    # ...
+    # Verificação de colunas mínimas (Ajustar conforme o seu real df_fisico/df_full)
+    if 'sku' not in df_fisico.columns:
+        st.error(f"Erro: A base de Estoque {empresa} não contém a coluna 'sku'.")
+        return None
+    if 'sku' not in df_full.columns:
+        st.error(f"Erro: A base de Vendas {empresa} não contém a coluna 'sku'.")
+        return None
+    
+    st.info("Explosão de kits e merges em andamento...")
+    
+    # --- 1. EXPLOSÃO DE KITS (Lógica placeholder) ---
+    # Implementar a lógica real de explosão de kits se houver (Merge df_fisico com df_kits)
     
     # 2. MERGE: Unir Estoque (FISICO) com Vendas (FULL) e Preços (CATALOGO)
+    
+    # Merge com o Full (para Vendas 60d, etc.)
     df_final = pd.merge(
         df_fisico, 
-        df_full[['sku', 'vendas_qtd_61d', 'vendas_valor_r$']], 
+        df_full[['sku', 'vendas_qtd_61d', 'vendas_valor_r$']], # Colunas do Full (devem ser normalizadas)
         on='sku', 
         how='left'
     )
     
+    # Merge com o Catálogo (para Preço de Custo)
     df_final = pd.merge(
         df_final, 
-        df_catalogo_simples[['sku', 'custo_medio']], 
+        df_catalogo_simples[['sku', 'custo_medio']], # Colunas do Catálogo
         on='sku', 
         how='left'
     )
     
-    # 3. CÁLCULO DE REPOSIÇÃO (Placeholder)
-    df_final['custo_medio'] = df_final['custo_medio'].apply(utils.br_to_float)
-    df_final['vendas_qtd_61d'] = df_final['vendas_qtd_61d'].fillna(0).astype(int)
+    # 3. TRATAMENTO E CÁLCULO DE REPOSIÇÃO
     
-    df_final['Estoque_Fisico'] = df_final['estoque_atual'] # Corrigindo nome
-    df_final['Vendas_60d'] = df_final['vendas_qtd_61d']
-    df_final['Preco_Custo'] = df_final['custo_medio']
+    df_final['Estoque_Fisico'] = df_final['estoque_atual'] # Ajuste de nome
+    df_final['Vendas_60d'] = df_final['vendas_qtd_61d'].fillna(0)
+    df_final['Preco_Custo'] = df_final['custo_medio'].apply(utils.br_to_float)
+    df_final['Vendas_60d'] = df_final['Vendas_60d'].astype(int)
 
     # Lógica de falta (Exemplo)
     df_final['Faltam'] = np.where(
