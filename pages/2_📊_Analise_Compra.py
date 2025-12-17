@@ -5,33 +5,32 @@ from src.logic import calcular_reposicao
 st.set_page_config(page_title="Análise de Compra", layout="wide")
 st.title("📊 Painel de Compras")
 
-# --- SIDEBAR COM PARÂMETROS E FILTRO DE SKU ---
 with st.sidebar:
     st.header("⚙️ Parâmetros")
-    dias_horizonte = st.number_input("Dias Cobertura", min_value=15, value=45, step=5)
-    crescimento = st.number_input("Crescimento %", min_value=0.0, value=0.0, step=5.0)
-    lead_time = st.number_input("Lead Time (Dias)", min_value=0, value=0, step=1)
+    dias_h = st.number_input("Dias Cobertura", min_value=15, value=45, step=5)
+    cresc = st.number_input("Crescimento %", min_value=0.0, value=0.0, step=5.0)
+    lead = st.number_input("Lead Time (Dias)", min_value=0, value=0, step=1)
     
     st.divider()
-    st.header("🔍 Busca Rápida")
-    filtro_sku = st.text_input("Filtrar por SKU").strip().upper()
+    st.header("🔍 Filtros")
+    f_sku = st.text_input("Filtrar SKU").strip().upper()
     
     if st.button("🔄 Recalcular", type="primary", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
 @st.cache_data
-def get_analise(dias, cresc, lead):
+def carregar_dados(d, c, l):
     analises = {}
-    for emp in ["ALIVVIA", "JCA"]:
-        df = calcular_reposicao(emp, dias, cresc, lead)
-        if df is not None:
-            analises[emp] = df
+    for empresa in ["ALIVVIA", "JCA"]:
+        df_res = calcular_reposicao(empresa, d, c, l)
+        if df_res is not None:
+            analises[empresa] = df_res
     return analises
 
-resultados = get_analise(dias_horizonte, crescimento, lead_time)
+resultados = carregar_dados(dias_h, cresc, lead)
 
-# COLUNAS FIXAS EXIGIDAS POR VOCÊ
+# A LISTA EXATA QUE VOCÊ DETERMINOU
 colunas_exigidas = [
     "SKU", "Fornecedor", "Preço de custo", "Vendas full", 
     "vendas Shopee", "Estoque full", "Estoque fisico", 
@@ -39,28 +38,26 @@ colunas_exigidas = [
 ]
 
 if not resultados:
-    st.warning("⚠️ Carregue o catálogo na Home e faça o upload dos arquivos no Gerenciador.")
+    st.warning("⚠️ Sem dados. Carregue o catálogo e os arquivos primeiro.")
 else:
     for emp, df in resultados.items():
-        # Blindagem: se por algum erro o df vier vazio ou None, não quebra a tela
+        # Blindagem: Se o cálculo retornar None ou algo errado, pula para não travar
         if df is None or df.empty:
-            st.error(f"Não foi possível processar os dados da {emp}.")
             continue
             
         with st.expander(f"📦 Resultado {emp}", expanded=True):
-            # 1. Filtro de SKU (Busca)
-            if filtro_sku:
-                df = df[df['SKU'].str.contains(filtro_sku, na=False)]
+            # Filtro SKU
+            if f_sku:
+                df = df[df['SKU'].str.contains(f_sku, na=False)]
             
-            # 2. Filtro de Fornecedor (Multiselect)
-            # O dropna() e unique() garantem que não dê erro se houver lixo nos dados
-            lista_forn = sorted([str(x) for x in df['Fornecedor'].dropna().unique()])
-            fornecedores_sel = st.multiselect(f"Filtrar por Fornecedor ({emp})", lista_forn, key=f"f_{emp}")
+            # Filtro Fornecedor
+            lista_forn = sorted([str(x) for x in df['Fornecedor'].unique() if x != 0 and pd.notna(x)])
+            sel_forn = st.multiselect(f"Filtrar Fornecedor ({emp})", lista_forn)
             
-            if fornecedores_sel:
-                df = df[df['Fornecedor'].isin(fornecedores_sel)]
+            if sel_forn:
+                df = df[df['Fornecedor'].isin(sel_forn)]
 
-            # Exibição Final
+            # AQUI ESTAVA O ERRO: Agora garantimos que as colunas existem
             df_final = df[colunas_exigidas].sort_values("Compra sugerida", ascending=False)
             
             st.dataframe(
@@ -73,5 +70,5 @@ else:
                 }
             )
             
-            total_invest = df_final['Valor total da compra sugerida'].sum()
-            st.markdown(f"**Total Investimento {emp}:** R$ {total_invest:,.2f}")
+            invest = df_final["Valor total da compra sugerida"].sum()
+            st.markdown(f"**Total Investimento {emp}:** R$ {invest:,.2f}")
