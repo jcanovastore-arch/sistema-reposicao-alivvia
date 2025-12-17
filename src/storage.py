@@ -4,7 +4,8 @@ from supabase import create_client
 def get_client():
     try:
         return create_client(st.secrets["supabase_url"], st.secrets["supabase_key"])
-    except:
+    except Exception as e:
+        st.error(f"Erro Configuração Secrets: {e}")
         return None
 
 BUCKET = "arquivos"
@@ -15,31 +16,32 @@ def upload(file_obj, path):
     if not c: return False
     try:
         content = file_obj.getvalue()
-        # Tenta remover anterior para evitar conflito de cache
+        # Tenta remover anterior
         try: c.storage.from_(BUCKET).remove([path])
         except: pass
         
-        c.storage.from_(BUCKET).upload(path, content, {"content-type": file_obj.type, "upsert": "true"})
+        # Upload
+        res = c.storage.from_(BUCKET).upload(path, content, {"content-type": file_obj.type, "upsert": "true"})
         return True
     except Exception as e:
+        # AQUI ESTA A MUDANÇA: Vai mostrar o erro na tela
+        st.error(f"ERRO SUPABASE: {e}") 
         return False
 
 def delete_file(path):
-    """Apaga arquivo da nuvem"""
     c = get_client()
     if not c: return False
     try:
         c.storage.from_(BUCKET).remove([path])
         return True
-    except:
+    except Exception as e:
+        st.error(f"Erro ao deletar: {e}")
         return False
 
 def file_exists(path):
-    """Checa se arquivo existe (rápido)"""
     c = get_client()
     if not c: return False
     try:
-        # Tenta listar o arquivo na pasta
         folder = "/".join(path.split("/")[:-1])
         filename = path.split("/")[-1]
         res = c.storage.from_(BUCKET).list(folder, {"search": filename})
@@ -48,7 +50,6 @@ def file_exists(path):
         return False
 
 def download(path):
-    """Baixa o conteúdo"""
     c = get_client()
     if not c: return None
     try:
