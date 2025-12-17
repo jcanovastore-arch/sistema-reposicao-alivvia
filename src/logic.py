@@ -4,129 +4,59 @@ import io
 import numpy as np
 from src import storage, utils 
 
-# --- FUNÇÕES DE LEITURA DO SUPABASE (AJUSTE FINAL DE PARSING) ---
-
 def read_file_from_storage(empresa, tipo_arquivo):
-    """Lê e processa arquivos XLSX ou CSV baixados do Supabase."""
     path = f"{empresa}/{tipo_arquivo}.xlsx"
-    
     content = storage.download(path)
-    if content is None:
-        st.warning(f"Arquivo {tipo_arquivo} da {empresa} não encontrado ou vazio.")
-        return None
-
-    is_csv_slot = tipo_arquivo.upper() in ["EXT", "FISICO"] 
+    if content is None: return None
+    
     content_io = io.BytesIO(content)
-
-    if not is_csv_slot:
-        # Leitura de XLSX (para o FULL)
-        try:
-            return utils.normalize_cols(pd.read_excel(content_io))
-        except Exception:
-            return None
-
-    # --- Lógica de Leitura CSV (PARA EXT e FISICO) ---
-    
-    # Tentativa 1 (Padrão: Vírgula, pulando 2 linhas) - A mais provável para o seu arquivo
     try:
-        content_io.seek(0) 
-        df = pd.read_csv(
-            content_io, 
-            encoding='latin1', 
-            sep=',', 
-            skiprows=2,     # <-- SOLUÇÃO FINAL: PULA AS 2 PRIMEIRAS LINHAS DE JUNK
-            header=0,       # <-- LÊ A PRÓXIMA LINHA COMO CABEÇALHO
-            engine='python', # Necessário para lidar com aspas e vírgulas complexas
-            on_bad_lines='skip'
-        )
-        # Validação: se o DataFrame tem mais de 1 coluna e a coluna SKU existe (após normalização)
-        if df.shape[1] > 1 and 'sku' in utils.normalize_cols(df).columns: 
-            return utils.normalize_cols(df)
-    except:
-        pass 
-        
-    # Tentativa 2 (Padrão: Ponto-e-vírgula, pulando 2 linhas) - Backup
-    try:
-        content_io.seek(0)
-        df = pd.read_csv(
-            content_io, 
-            encoding='latin1', 
-            sep=';', 
-            skiprows=2, 
-            header=0,
-            engine='python', 
-            on_bad_lines='skip'
-        )
-        if df.shape[1] > 1 and 'sku' in utils.normalize_cols(df).columns: 
-            return utils.normalize_cols(df)
-    except:
-        pass
-        
-    # Último recurso se tudo falhar
-    st.error(f"Erro Crítico: Falha ao ler arquivo {tipo_arquivo} (CSV). Verifique o formato.")
-    return None
-
-
-# --- FUNÇÕES WRAPPER, CÁLCULO E LÓGICA (Mantenha o resto das funções aqui) ---
-@st.cache_data(ttl=600)
-def get_relatorio_full(empresa):
-    return read_file_from_storage(empresa, "FULL")
-
-@st.cache_data(ttl=600)
-def get_vendas_externas(empresa):
-    return read_file_from_storage(empresa, "EXT")
-
-@st.cache_data(ttl=600)
-def get_estoque_fisico(empresa):
-    return read_file_from_storage(empresa, "FISICO")
-
-
-def calcular_reposicao(empresa, bases):
-    """
-    Função principal que orquestra a lógica de reposição.
-    """
-    df_kits = bases['catalogo_kits']
-    df_catalogo_simples = bases['catalogo_simples']
-    df_full = bases['df_full']
-    df_fisico = bases['df_fisico']
-    
-    # Verificação de colunas mínimas (Pode falhar se o SKU não for lido corretamente!)
-    if 'sku' not in df_fisico.columns or 'sku' not in df_full.columns:
-        st.error(f"Erro de Coluna: O arquivo da {empresa} não tem a coluna 'sku'. O arquivo não foi lido corretamente.")
+        # Se for FULL, pula as 2 linhas de cabeçalho do ML
+        if tipo_arquivo == "FULL":
+            df = pd.read_excel(content_io, skiprows=2)
+        elif tipo_arquivo == "FISICO":
+            # Seus arquivos de estoque são CSV com vírgula
+            df = pd.read_csv(content_io, encoding='latin1', sep=',')
+        else:
+            # Vendas Shopee/Externas
+            df = pd.read_csv(content_io, encoding='utf-8', sep=',')
+            
+        return utils.normalize_cols(df)
+    except Exception as e:
+        st.error(f"Erro ao ler {tipo_arquivo}: {e}")
         return None
+
+def calcular_reposicao(df_full, df_fisico, df_ext, df_kits, df_catalogo, empresa):
+    # Normalização
+    df_full['sku'] = df_full['sku'].apply(utils.norm_sku)
+    df_fisico['sku'] = df_fisico['sku'].apply(utils.norm_sku)
+    df_kits['sku_kit'] = df_kits['sku_kit'].apply(utils.norm_sku)
+    df_kits['sku_componente'] = df_kits['sku_componente'].apply(utils.norm_sku)
     
-    st.info("Explosão de kits e merges em andamento...")
+    # Unir Vendas (Full + Shopee/Ext)
+    vendas_shopee = df_ext[['sku', 'vendas_qtd']].copy() if df_ext is not None else pd.DataFrame(columns=['sku', 'vendas_qtd'])
+    vendas_ml = df_full[['sku', 'vendas_qtd']].copy()
     
-    # 2. MERGE e CÁLCULO (Código da resposta anterior)
+    vendas_totais = pd.concat([vendas_ml, vendas_shopee]).groupby('sku')['vendas_qtd'].sum().reset_index()
+
+    # EXPLOSÃO DE KITS
+    vendas_com_kits = pd.merge(df_kits, vendas_totais, left_on='sku_kit', right_on='sku', how='inner')
+    vendas_com_kits['vendas_calc'] = vendas_com_kits['vendas_qtd'] * vendas_com_kits['quantidade_no_kit']
+    vendas_explodidas = vendas_com_kits.groupby('sku_componente')['vendas_calc'].sum().reset_index()
+    vendas_explodidas.rename(columns={'sku_componente': 'sku', 'vendas_calc': 'vendas_vinda_de_kits'}, inplace=True)
+
+    # Base Final
+    df_final = pd.merge(df_fisico[['sku', 'estoque_atual']], vendas_totais, on='sku', how='left').fillna(0)
+    df_final = pd.merge(df_final, vendas_explodidas, on='sku', how='left').fillna(0)
     
-    # ... (O resto do código de merge e cálculo)
-    df_final = pd.merge(
-        df_fisico, 
-        df_full[['sku', 'vendas_qtd_61d', 'vendas_valor_r$']], 
-        on='sku', 
-        how='left'
-    )
+    df_final['Vendas_Total_60d'] = df_final['vendas_qtd'] + df_final['vendas_vinda_de_kits']
     
-    df_final = pd.merge(
-        df_final, 
-        df_catalogo_simples[['sku', 'custo_medio']], 
-        on='sku', 
-        how='left'
-    )
+    # Trazer Custos
+    df_final = pd.merge(df_final, df_catalogo[['sku', 'custo_medio', 'fornecedor']], on='sku', how='left')
     
-    df_final['Estoque_Fisico'] = df_final['estoque_atual']
-    df_final['Vendas_60d'] = df_final['vendas_qtd_61d'].fillna(0)
+    # Cálculos
+    df_final['Compra_Sugerida'] = (df_final['Vendas_Total_60d'] - df_final['estoque_atual']).clip(lower=0)
     df_final['Preco_Custo'] = df_final['custo_medio'].apply(utils.br_to_float)
-    df_final['Vendas_60d'] = df_final['Vendas_60d'].astype(int)
-
-    df_final['Faltam'] = np.where(
-        (df_final['Estoque_Fisico'] - df_final['Vendas_60d'] / 60 * 30) < 0,
-        (df_final['Vendas_60d'] / 60 * 30) - df_final['Estoque_Fisico'],
-        0
-    )
-    df_final['Compra_Sugerida'] = np.ceil(df_final['Faltam']).astype(int)
-    df_final['Valor_Compra_R$'] = df_final['Compra_Sugerida'] * df_final['Preco_Custo'].fillna(0)
-
-    df_final['Empresa'] = empresa
+    df_final['Valor_Sugerido_R$'] = df_final['Compra_Sugerida'] * df_final['Preco_Custo']
     
-    return df_final.filter(regex='(sku|Empresa|Estoque_|Vendas_|Preco_|Compra_|Valor_|Faltam)', axis=1)
+    return df_final.rename(columns={'sku': 'SKU', 'estoque_atual': 'Estoque_Fisico', 'fornecedor': 'Fornecedor'})
