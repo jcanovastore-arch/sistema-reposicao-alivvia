@@ -17,6 +17,11 @@ if 'upload_counter' not in st.session_state:
 # Inicializa o estado do catálogo (Aqui onde os dados são salvos)
 if 'catalogo_dados' not in st.session_state:
     st.session_state['catalogo_dados'] = None
+    
+# Inicializa o estado 'catalogo_carregado'
+if 'catalogo_carregado' not in st.session_state:
+    st.session_state['catalogo_carregado'] = False
+
 
 # --- Sidebar ---
 st.sidebar.title("Reposição Rápida")
@@ -27,14 +32,15 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Padrão KITS/CATALOGO")
 
 # Mostra o status atual
-if st.session_state['catalogo_dados'] is not None:
+if st.session_state['catalogo_dados'] is not None and st.session_state['catalogo_carregado']:
     st.sidebar.success("KITS/CATALOGO carregado!")
 else:
     st.sidebar.warning("Carregamento pendente.")
 
 # Botão para carregar os dados
 if st.sidebar.button("⬇️ Carregar Padrão KITS/CATALOGO"):
-    dados = load_catalogo_padrao()
+    # Carrega os dados usando a função importada
+    dados = load_catalogo_padrao() 
     if dados:
         st.session_state['catalogo_dados'] = dados
         # O rerun é o que faz o status mudar de Pendente para Carregado.

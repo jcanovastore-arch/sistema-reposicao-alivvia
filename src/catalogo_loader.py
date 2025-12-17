@@ -4,7 +4,8 @@ import io
 import requests
 
 # --- URL DO SEU CATÁLOGO PADRÃO (Link de exportação XLSX) ---
-GOOGLE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/export?format=xlsx"
+# **CERTIFIQUE-SE DE QUE ESTE É O SEU LINK CORRETO**
+GOOGLE_SHEETS_URL = "https://docs.google.com/sheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/export?format=xlsx"
 
 @st.cache_data(ttl=3600, show_spinner="Baixando e processando Catálogo Padrão...")
 def load_catalogo_padrao():
@@ -19,7 +20,7 @@ def load_catalogo_padrao():
 
         # 3. Lê as duas abas necessárias
         df_kits = pd.read_excel(excel_data, sheet_name="KITS")
-        df_catalogo = pd.read_excel(excel_data, sheet_data="CATALOGO_SIMPLES") # erro consertado, se ocorrer
+        df_catalogo = pd.read_excel(excel_data, sheet_name="CATALOGO_SIMPLES") # Corrigido: use sheet_name
 
         # 4. Normalização das colunas
         df_kits.columns = [col.lower().strip().replace(' ', '_') for col in df_kits.columns]
