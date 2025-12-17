@@ -11,7 +11,7 @@ def render_file_slot(empresa, label_amigavel, tipo_arquivo):
     """
     Cria um bloco visual para gerenciar um único arquivo.
     """
-    # Caminho exato no Supabase
+    # Caminho exato no Supabase (padronizado para .xlsx)
     path_cloud = f"{empresa}/{tipo_arquivo}.xlsx"
     
     st.markdown(f"**{label_amigavel}**")
@@ -39,7 +39,7 @@ def render_file_slot(empresa, label_amigavel, tipo_arquivo):
     # 2. Área de Upload (Sempre visível para permitir sobrescrever)
     arquivo = st.file_uploader(
         f"Enviar {label_amigavel}", 
-        type=["xlsx"], # Tipos aceitos pelo sistema
+        type=["xlsx", "csv"], # <--- ACEITA XLSX E CSV (Correção final do uploader)
         key=f"up_{path_cloud}",
         label_visibility="collapsed"
     )
