@@ -12,32 +12,23 @@ def load_catalogo_padrao(url=URL_PADRAO):
         response.raise_for_status()
         content = io.BytesIO(response.content)
         
-        # Lê a aba que você determinou
         df_catalogo = pd.read_excel(content, sheet_name="CATALOGO_SIMPLES")
         content.seek(0)
         df_kits = pd.read_excel(content, sheet_name="KITS")
         
-        # Normaliza os nomes das colunas (tira espaços, acentos, etc)
         df_catalogo = utils.normalize_cols(df_catalogo)
         df_kits = utils.normalize_cols(df_kits)
         
-        # --- SOLUÇÃO DO KEYERROR ---
-        # Procura por variações de nome e força para 'sku'
-        possiveis_skus = ['sku', 'codigo', 'cod', 'item', 'produto', 'codigo_sku']
+        # Padroniza a coluna SKU no catálogo
         for col in df_catalogo.columns:
-            if col in possiveis_skus:
+            if col in ['sku', 'codigo', 'cod', 'item', 'codigo_sku']:
                 df_catalogo.rename(columns={col: 'sku'}, inplace=True)
                 break
         
-        # Se mesmo assim não achar a coluna 'sku', pega a PRIMEIRA coluna da planilha
-        if 'sku' not in df_catalogo.columns:
-            df_catalogo.rename(columns={df_catalogo.columns[0]: 'sku'}, inplace=True)
-
-        # Limpa os valores do SKU
-        df_catalogo['sku'] = df_catalogo['sku'].apply(utils.norm_sku)
-        
+        if 'sku' in df_catalogo.columns:
+            df_catalogo['sku'] = df_catalogo['sku'].apply(utils.norm_sku)
+            
         return {"catalogo": df_catalogo, "kits": df_kits}
-
     except Exception as e:
-        st.error(f"Erro ao carregar Planilha: {e}")
+        st.error(f"Erro no Drive: {e}")
         return None
