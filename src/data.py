@@ -1,29 +1,20 @@
 import streamlit as st
-# Importa APENAS funções existentes no logic.py
-from .logic import get_relatorio_full, get_vendas_externas, get_estoque_fisico 
+from . import logic 
 
-# --- FUNÇÃO PARA PEGAR TODOS OS ARQUIVOS BASE ---
 def carregar_bases_para_calculo(empresa):
     """
-    Carrega todos os DataFrames necessários para o cálculo de reposição.
+    Carrega os DataFrames do Supabase e do Google Sheets.
     """
-    # 1. Dados carregados via Upload (Supabase)
-    df_full = get_relatorio_full(empresa)
-    df_ext = get_vendas_externas(empresa) # Não usado na lógica de compra, mas bom ter
-    df_fisico = get_estoque_fisico(empresa)
+    # 1. Busca no Supabase (via logic.py)
+    df_full = logic.get_relatorio_full(empresa)
+    df_ext = logic.get_vendas_externas(empresa)
+    df_fisico = logic.get_estoque_fisico(empresa)
 
-    # 2. Dados carregados via Google Sheets (Catálogo Padrão)
+    # 2. Busca o Catálogo que foi carregado na Home
     dados_catalogo = st.session_state.get('catalogo_dados')
     
-    # 3. Verificação
-    bases_ok = (
-        df_full is not None and 
-        df_fisico is not None and
-        dados_catalogo is not None
-    )
-
-    if not bases_ok:
-        # Se as bases falharam, a função de cálculo não será chamada.
+    # 3. Verificação de integridade
+    if df_full is None or df_fisico is None or dados_catalogo is None:
         return None
         
     return {
