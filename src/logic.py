@@ -4,14 +4,9 @@ import io
 import numpy as np
 from src import storage, utils 
 
-def get_relatorio_full(empresa):
-    return read_file_from_storage(empresa, "FULL")
-
-def get_vendas_externas(empresa):
-    return read_file_from_storage(empresa, "EXT")
-
-def get_estoque_fisico(empresa):
-    return read_file_from_storage(empresa, "FISICO")
+def get_relatorio_full(empresa): return read_file_from_storage(empresa, "FULL")
+def get_vendas_externas(empresa): return read_file_from_storage(empresa, "EXT")
+def get_estoque_fisico(empresa): return read_file_from_storage(empresa, "FISICO")
 
 def read_file_from_storage(empresa, tipo_arquivo):
     path = f"{empresa}/{tipo_arquivo}.xlsx"
@@ -21,49 +16,61 @@ def read_file_from_storage(empresa, tipo_arquivo):
     content_io = io.BytesIO(content)
     try:
         if tipo_arquivo == "FULL":
-            # Pula as 2 linhas de lixo do Mercado Livre
+            # ML Full sempre pula 2 linhas
             df = pd.read_excel(content_io, skiprows=2)
         else:
-            # Tenta ler como CSV (Estoque e Shopee)
+            # Tenta ler CSV com os separadores comuns no Brasil
             try:
+                content_io.seek(0)
                 df = pd.read_csv(content_io, encoding='latin1', sep=',')
             except:
+                content_io.seek(0)
                 df = pd.read_csv(content_io, encoding='utf-8', sep=';')
+        
+        df = utils.normalize_cols(df)
+        
+        # Validação Crítica: Se não achou a coluna SKU, o sistema não pode continuar
+        if 'sku' not in df.columns:
+            st.error(f"ERRO: Não foi possível encontrar a coluna de SKU no arquivo {tipo_arquivo} da {empresa}. Verifique o formato.")
+            return None
             
-        return utils.normalize_cols(df)
+        return df
     except Exception as e:
+        st.error(f"Erro ao processar {tipo_arquivo}: {e}")
         return None
 
 def calcular_reposicao(df_full, df_fisico, df_ext, df_kits, df_catalogo, empresa):
-    # Garante que os SKUs estão limpos para o cruzamento
-    df_full['sku'] = df_full['sku'].apply(utils.norm_sku)
-    df_fisico['sku'] = df_fisico['sku'].apply(utils.norm_sku)
+    # 1. Normalização de dados
+    for d in [df_full, df_fisico, df_kits]:
+        if 'sku' in d.columns: d['sku'] = d['sku'].apply(utils.norm_sku)
+    
     df_kits['sku_kit'] = df_kits['sku_kit'].apply(utils.norm_sku)
     df_kits['sku_componente'] = df_kits['sku_componente'].apply(utils.norm_sku)
     
-    # Soma vendas (ML + Shopee)
-    vendas_ml = df_full[['sku', 'vendas_qtd']].copy()
-    vendas_sh = df_ext[['sku', 'qtde_vendas']].copy() if df_ext is not None else pd.DataFrame(columns=['sku', 'qtde_vendas'])
-    vendas_sh.rename(columns={'qtde_vendas': 'vendas_qtd'}, inplace=True)
+    # 2. Vendas ML
+    vendas = df_full[['sku', 'vendas_qtd']].copy()
     
-    vendas_totais = pd.concat([vendas_ml, vendas_sh]).groupby('sku')['vendas_qtd'].sum().reset_index()
+    # 3. Vendas Externas (Shopee)
+    if df_ext is not None and 'vendas_qtd' in df_ext.columns:
+        v_ext = df_ext[['sku', 'vendas_qtd']].copy()
+        vendas = pd.concat([vendas, v_ext])
+    
+    vendas_totais = vendas.groupby('sku')['vendas_qtd'].sum().reset_index()
 
-    # EXPLOSÃO DE KITS
-    vendas_com_kits = pd.merge(df_kits, vendas_totais, left_on='sku_kit', right_on='sku', how='inner')
-    vendas_com_kits['vendas_calc'] = vendas_com_kits['vendas_qtd'] * vendas_com_kits['quantidade_no_kit']
-    vendas_explodidas = vendas_com_kits.groupby('sku_componente')['vendas_calc'].sum().reset_index()
-    vendas_explodidas.rename(columns={'sku_componente': 'sku', 'vendas_calc': 'vendas_vinda_de_kits'}, inplace=True)
+    # 4. Explosão de Kits
+    v_kits = pd.merge(df_kits, vendas_totais, left_on='sku_kit', right_on='sku', how='inner')
+    v_kits['v_expl'] = v_kits['vendas_qtd'] * v_kits['quantidade_no_kit']
+    v_expl_agrupada = v_kits.groupby('sku_componente')['v_expl'].sum().reset_index().rename(columns={'sku_componente': 'sku'})
 
-    # Base Final: Começa pelo Estoque Físico
+    # 5. Cruzamento Final
     df_final = pd.merge(df_fisico[['sku', 'estoque_atual']], vendas_totais, on='sku', how='left').fillna(0)
-    df_final = pd.merge(df_final, vendas_explodidas, on='sku', how='left').fillna(0)
+    df_final = pd.merge(df_final, v_expl_agrupada, on='sku', how='left').fillna(0)
     
-    df_final['Vendas_Total_60d'] = df_final['vendas_qtd'] + df_final['vendas_vinda_de_kits']
+    df_final['Vendas_Total_60d'] = df_final['vendas_qtd'] + df_final['v_expl']
     
-    # Traz Informações do Catálogo
+    # Traz custo e fornecedor do catálogo
     df_final = pd.merge(df_final, df_catalogo[['sku', 'custo_medio', 'fornecedor']], on='sku', how='left')
     
-    # Cálculos Finais
     df_final['Compra_Sugerida'] = (df_final['Vendas_Total_60d'] - df_final['estoque_atual']).clip(lower=0)
     df_final['Preco_Custo'] = df_final['custo_medio'].apply(utils.br_to_float)
     df_final['Valor_Sugerido_R$'] = df_final['Compra_Sugerida'] * df_final['Preco_Custo']
