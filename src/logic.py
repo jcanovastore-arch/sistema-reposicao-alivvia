@@ -1,6 +1,7 @@
 import pandas as pd
 import streamlit as st
 import io
+import numpy as np
 from src import storage, utils 
 
 def get_relatorio_full(empresa): return read_file_from_storage(empresa, "FULL")
@@ -15,10 +16,10 @@ def read_file_from_storage(empresa, tipo_arquivo):
     content_io = io.BytesIO(content)
     try:
         if tipo_arquivo == "FULL":
-            # Mercado Livre Full (pula 2 linhas de cabeçalho do ML)
+            # Mercado Livre Full pula 2 linhas
             df = pd.read_excel(content_io, skiprows=2)
         else:
-            # FISICO ou EXT (Shopee/Bling) - Suporta vírgula ou ponto-e-vírgula
+            # Tenta ler CSV com detecção de aspas e codificação correta
             try:
                 content_io.seek(0)
                 df = pd.read_csv(content_io, encoding='utf-8-sig', sep=',', quotechar='"')
@@ -27,10 +28,11 @@ def read_file_from_storage(empresa, tipo_arquivo):
                 content_io.seek(0)
                 df = pd.read_csv(content_io, encoding='latin1', sep=';', quotechar='"')
         
+        # Aplica a limpeza e tradução de colunas
         df = utils.normalize_cols(df)
         
         if 'sku' not in df.columns:
-            st.error(f"Erro: Coluna SKU não encontrada. Colunas lidas: {list(df.columns)}")
+            st.error(f"Erro: Não achei SKU no arquivo {tipo_arquivo}. Colunas lidas: {list(df.columns)}")
             return None
         return df
     except Exception as e:
@@ -38,13 +40,13 @@ def read_file_from_storage(empresa, tipo_arquivo):
         return None
 
 def calcular_reposicao(df_full, df_fisico, df_ext, df_kits, df_catalogo, empresa):
-    # Garante SKUs limpos para comparação
+    # Padronização de SKUs
     df_full['sku'] = df_full['sku'].apply(utils.norm_sku)
     df_fisico['sku'] = df_fisico['sku'].apply(utils.norm_sku)
     df_kits['sku_kit'] = df_kits['sku_kit'].apply(utils.norm_sku)
     df_kits['sku_componente'] = df_kits['sku_componente'].apply(utils.norm_sku)
     
-    # 1. Consolidar Vendas Diretas (ML + Shopee)
+    # 1. Soma Vendas
     vendas = df_full[['sku', 'vendas_qtd']].copy()
     if df_ext is not None and 'vendas_qtd' in df_ext.columns:
         v_ext = df_ext[['sku', 'vendas_qtd']].copy()
@@ -57,17 +59,15 @@ def calcular_reposicao(df_full, df_fisico, df_ext, df_kits, df_catalogo, empresa
     v_com_kits['v_expl'] = v_com_kits['vendas_qtd'] * v_com_kits['quantidade_no_kit']
     v_expl_final = v_com_kits.groupby('sku_componente')['v_expl'].sum().reset_index().rename(columns={'sku_componente': 'sku'})
 
-    # 3. Cruzamento Final (Base no Estoque Físico)
+    # 3. Merge Final (Base no Estoque Físico)
     df_res = pd.merge(df_fisico[['sku', 'estoque_atual']], vendas_agrupadas, on='sku', how='left').fillna(0)
     df_res = pd.merge(df_res, v_expl_final, on='sku', how='left').fillna(0)
-    
-    # Venda Total = Direta + vinda de Kits
     df_res['Vendas_Total_60d'] = df_res['vendas_qtd'] + df_res['v_expl']
     
-    # Traz Custo e Fornecedor do Catálogo
+    # Traz custos
     df_res = pd.merge(df_res, df_catalogo[['sku', 'custo_medio', 'fornecedor']], on='sku', how='left')
     
-    # 4. Cálculos de Sugestão
+    # 4. Cálculos
     df_res['Compra_Sugerida'] = (df_res['Vendas_Total_60d'] - df_res['estoque_atual']).clip(lower=0)
     df_res['Preco_Custo'] = df_res['custo_medio'].apply(utils.br_to_float)
     df_res['Valor_Sugerido_R$'] = df_res['Compra_Sugerida'] * df_res['Preco_Custo']
