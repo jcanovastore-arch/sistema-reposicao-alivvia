@@ -1,22 +1,54 @@
 import streamlit as st
+import time
+from src.logic import load_catalogo_padrao # Importa a nova função de logic.py
 
-st.set_page_config(page_title="Sistema Compras", layout="wide")
+# --- Configurações Iniciais e Session State (Mantenha o que você já tinha) ---
+st.set_page_config(
+    page_title="Reposição Fácil", 
+    layout="wide", 
+    initial_sidebar_state="expanded"
+)
 
-st.title("🏠 Sistema de Compras e Reposição")
+# Inicializa o estado para limpar o uploader (Corrigimos o loop)
+if 'upload_counter' not in st.session_state:
+    st.session_state['upload_counter'] = 0
 
-# INICIALIZAÇÃO GLOBAL DE VARIÁVEIS (Para não perder dados ao trocar de página)
-if "pedido" not in st.session_state:
-    st.session_state.pedido = []
+# Inicializa o estado do catálogo
+if 'catalogo_dados' not in st.session_state:
+    st.session_state['catalogo_dados'] = None
 
-if "catalogo" not in st.session_state:
-    st.session_state.catalogo = None
+# --- Sidebar ---
+st.sidebar.title("Reposição Rápida")
+st.sidebar.markdown("---")
 
-st.info("👈 Use o menu lateral para navegar entre as ferramentas.")
-st.markdown("""
-- **1. Uploads:** Envie os arquivos para a nuvem (Supabase).
-- **2. Análise:** Calcule sugestão de compras separando Full/Externo.
-- **3. Inbound:** Cruza Nota Fiscal/PDF com Estoque Físico.
-- **4. Editor OC:** Finalize o pedido com itens selecionados.
-- **5. Gestão:** Histórico de pedidos salvos.
-- **6. Alocação:** Divida uma compra grande entre as empresas baseado nas vendas.
-""")
+
+# --- Bloco do Catálogo na Sidebar (CORREÇÃO DE ACESSO A BASE) ---
+st.sidebar.subheader("Padrão KITS/CATALOGO")
+
+# Mostra o status atual
+if st.session_state['catalogo_dados'] is not None:
+    st.sidebar.success("KITS/CATALOGO carregado!")
+else:
+    st.sidebar.warning("Carregamento pendente.")
+
+# Botão para carregar os dados
+if st.sidebar.button("⬇️ Carregar Padrão KITS/CATALOGO"):
+    dados = load_catalogo_padrao()
+    if dados:
+        st.session_state['catalogo_dados'] = dados
+        st.rerun() # Recarrega para que o status mude para "carregado"
+
+
+# --- Conteúdo Principal (Adapte conforme sua página inicial) ---
+
+st.header("Seja Bem-vindo ao Sistema de Reposição")
+st.markdown("Use a barra lateral para navegar:")
+st.info("1. Vá para **'Uploads'** e envie os arquivos base da semana.")
+st.info("2. Clique em **'Carregar Padrão KITS/CATALOGO'** na sidebar.")
+st.info("3. Vá para **'Calculadora de Reposição'** para gerar a compra final.")
+
+# --- Código para teste da função calcular_reposicao (Opcional) ---
+# if st.button("Testar Cálculo (Apenas Debug)"):
+#     resultado = calcular_reposicao("ALIVVIA")
+#     if resultado is not None:
+#         st.dataframe(resultado.head())

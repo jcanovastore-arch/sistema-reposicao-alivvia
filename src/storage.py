@@ -2,17 +2,19 @@ import streamlit as st
 from supabase import create_client
 import io
 
+# --- Função de Cliente ---
 def get_client():
     """Tenta criar o cliente Supabase com as secrets."""
     try:
+        # Certifique-se que as chaves estão no Streamlit Secrets
         return create_client(st.secrets["supabase_url"], st.secrets["supabase_key"])
     except Exception as e:
-        # Mantém este erro para diagnóstico de credenciais
         st.error(f"Erro Configuração Secrets: {e}")
         return None
 
 BUCKET = "arquivos"
 
+# --- Funções CRUD ---
 def upload(file_obj, path):
     """Envia arquivo e retorna True/False. Corrige o MIME Type do CSV."""
     c = get_client()
@@ -20,15 +22,13 @@ def upload(file_obj, path):
     try:
         content = file_obj.getvalue()
         
-        # --- CORREÇÃO DO TIPO MIME PARA CSV ---
-        # Garante que o Supabase receba o tipo correto, evitando o erro 'text/csv files are not allowed'
+        # Define o tipo MIME correto para upload (CSV ou XLSX)
         if file_obj.type in ['text/csv', 'application/csv']:
             mime_type = 'text/csv'
         else:
             mime_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        # -------------------------------------
         
-        # Tenta remover anterior para evitar conflito de cache
+        # Tenta remover anterior (upsert)
         try: c.storage.from_(BUCKET).remove([path])
         except: pass
         
@@ -36,6 +36,7 @@ def upload(file_obj, path):
         c.storage.from_(BUCKET).upload(path, content, {"content-type": mime_type, "upsert": "true"})
         return True
     except Exception as e:
+        # Mantém este erro para diagnóstico de permissão (403 RLS)
         st.error(f"ERRO SUPABASE: {e}") 
         return False
 
@@ -55,6 +56,7 @@ def file_exists(path):
     c = get_client()
     if not c: return False
     try:
+        # Lista arquivos na pasta e procura pelo nome (mais rápido que tentar download)
         folder = "/".join(path.split("/")[:-1])
         filename = path.split("/")[-1]
         res = c.storage.from_(BUCKET).list(folder, {"search": filename})
@@ -63,7 +65,7 @@ def file_exists(path):
         return False
 
 def download(path):
-    """Baixa o conteúdo"""
+    """Baixa o conteúdo binário"""
     c = get_client()
     if not c: return None
     try:
