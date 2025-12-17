@@ -4,7 +4,7 @@ from src.catalogo_loader import load_catalogo_padrao
 
 st.set_page_config(page_title="Reposição Fácil", layout="wide", initial_sidebar_state="expanded")
 
-# Inicializa as variáveis de memória se não existirem
+# Inicializa as variáveis de memória (Essencial para as outras abas verem os dados)
 if 'catalogo_dados' not in st.session_state:
     st.session_state['catalogo_dados'] = None
 if 'catalogo_carregado' not in st.session_state:
@@ -13,27 +13,28 @@ if 'catalogo_carregado' not in st.session_state:
 st.sidebar.title("Reposição Rápida")
 st.sidebar.markdown("---")
 
-# --- Status Visual na Sidebar ---
+# Status visual
 if st.session_state['catalogo_carregado']:
     st.sidebar.success("✅ CATALOGO/KITS Carregados")
 else:
     st.sidebar.warning("⚠️ Carregamento Pendente")
 
-# --- O BOTÃO QUE RESOLVE O PROBLEMA ---
+# Botão de Carga
 if st.sidebar.button("⬇️ Carregar Padrão KITS/CATALOGO", type="primary"):
     with st.sidebar.status("Conectando ao Google Sheets...", expanded=False) as status:
+        # Busca os dados (Lógica congelada no catalogo_loader)
         dados = load_catalogo_padrao()
+        
         if dados:
-            # SALVA NAS DUAS VARIÁVEIS PARA A PÁGINA DE ANÁLISE ENXERGAR
             st.session_state['catalogo_dados'] = dados
             st.session_state['catalogo_carregado'] = True
             status.update(label="Carga concluída!", state="complete", expanded=False)
-            st.toast("Dados prontos para análise!")
-            time.sleep(1)
+            st.toast("Catálogo carregado!")
+            time.sleep(0.5)
             st.rerun()
         else:
-            st.sidebar.error("Erro ao acessar o Drive.")
+            st.sidebar.error("Falha ao carregar.")
 
-st.sidebar.markdown("---")
 st.header("🚀 Sistema de Reposição")
-st.info("Após o check verde na esquerda, vá para 'Análise Compra'.")
+st.markdown("---")
+st.info("Certifique-se de ver o check verde à esquerda antes de ir para a Análise de Compra.")
