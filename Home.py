@@ -1,6 +1,6 @@
 import streamlit as st
 import time
-from src.logic import load_catalogo_padrao # Importa a nova função de logic.py
+from src.catalogo_loader import load_catalogo_padrao # Importa a nova função de logic.py
 
 # --- Configurações Iniciais e Session State (Mantenha o que você já tinha) ---
 st.set_page_config(
