@@ -1,13 +1,13 @@
 import streamlit as st
-from src.logic import calcular_reposicao
-from src.data import carregar_bases_para_calculo # Assumindo que esta função está correta
-import pandas as pd # Para uso futuro de manipulação de dados
+from src.logic import calcular_reposicao # Esta importação AGORA vai funcionar
+from src.data import carregar_bases_para_calculo 
+import pandas as pd 
 
 st.set_page_config(page_title="Análise de Compra", layout="wide")
 st.title("📊 Análise e Sugestão de Reposição")
 
-# --- CORREÇÃO DO Attribute ERROR (V52) ---
-# Verifica se os dados do catálogo foram carregados na memória de forma segura.
+# --- CORREÇÃO DE Attribute ERROR (VERIFICAÇÃO SEGURA) ---
+# Se os dados não foram carregados pelo botão do Home.py, o Streamlit para aqui.
 dados_catalogo = st.session_state.get('catalogo_dados')
 
 if dados_catalogo is None:
@@ -39,10 +39,4 @@ if st.button("Executar Análise de Reposição"):
             st.subheader("Sugestão de Compra")
             st.dataframe(df_reposicao) # Mostra o DataFrame de saída
         else:
-            st.error("❌ Falha no cálculo de reposição. Verifique os logs e a função `calcular_reposicao`.")
-    else:
-        st.warning("⚠️ Não foi possível iniciar o cálculo. Verifique se todos os arquivos (Full, Ext, Físico) foram carregados na página 'Uploads'.")
-
-
-st.markdown("---")
-st.caption("Status do Catálogo Padrão: Carregado")
+            st.error("❌ Não foi possível gerar a sugestão. Verifique os uploads.")

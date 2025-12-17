@@ -1,10 +1,9 @@
 import pandas as pd
 import streamlit as st
 import io
-# Removido: import requests (pois a função de catálogo saiu daqui)
-from src import storage # Assumindo que storage.py existe
+from src import storage # Requer src/storage.py
 
-# --- FUNÇÕES DE LEITURA DO SUPABASE (MANTIDAS) ---
+# --- FUNÇÕES DE LEITURA DO SUPABASE ---
 
 def read_file_from_storage(empresa, tipo_arquivo):
     """Lê e processa arquivos XLSX ou CSV baixados do Supabase."""
@@ -24,7 +23,6 @@ def read_file_from_storage(empresa, tipo_arquivo):
             return None
 
     # --- Lógica de Leitura CSV ---
-    # Tenta ler com separador PONTO-E-VÍRGULA e VÍRGULA para máxima compatibilidade
     try:
         content_io.seek(0) 
         df = pd.read_csv(content_io, encoding='latin1', sep=';', decimal=',', on_bad_lines='skip')
@@ -54,23 +52,20 @@ def get_vendas_externas(empresa):
 def get_estoque_fisico(empresa):
     return read_file_from_storage(empresa, "FISICO")
 
-# --- FUNÇÃO PRINCIPAL DE CÁLCULO (USADA PELA PAGE 2) ---
+# --- FUNÇÃO PRINCIPAL DE CÁLCULO (CHAMADA PELA PAGE 2) ---
 
 def calcular_reposicao(empresa):
-    """
-    Função principal que orquestra a lógica de reposição.
-    """
+    """Função principal que orquestra a lógica de reposição."""
+    # O catálogo é verificado pelo 'data.py' antes de chamar esta função.
     df_full = get_relatorio_full(empresa)
     df_ext = get_vendas_externas(empresa)
     df_fisico = get_estoque_fisico(empresa)
     
-    # Pega o catálogo da memória (carregado pela Home)
-    dados_catalogo = st.session_state.get('catalogo_dados') 
-
-    if df_full is None or df_ext is None or df_fisico is None or dados_catalogo is None:
-        return None # A página 2 fará a verificação e exibirá o aviso.
-
-    st.success("Arquivos base e Catálogo carregados com sucesso. Processando dados...")
+    # Se uma base falhou, não tenta processar
+    if df_full is None or df_ext is None or df_fisico is None:
+        return None 
+    
+    st.success("Arquivos base carregados com sucesso. Processando dados...")
     
     # [AQUI VAI A SUA LÓGICA DE MERGE E CÁLCULO]
     

@@ -1,6 +1,6 @@
 import streamlit as st
-from .logic import get_relatorio_full, get_vendas_externas, get_estoque_fisico
-# Removida a linha 'from .logic import Catalogo'
+# Importa APENAS funções existentes no logic.py
+from .logic import get_relatorio_full, get_vendas_externas, get_estoque_fisico 
 
 # --- FUNÇÃO PARA PEGAR TODOS OS ARQUIVOS BASE (Upload + Catálogo) ---
 def carregar_bases_para_calculo(empresa):
@@ -13,6 +13,7 @@ def carregar_bases_para_calculo(empresa):
     df_fisico = get_estoque_fisico(empresa)
 
     # 2. Dados carregados via Google Sheets (Catálogo Padrão)
+    # A variável 'catalogo_dados' é colocada na memória pelo Home.py
     dados_catalogo = st.session_state.get('catalogo_dados')
     
     # 3. Verificação
@@ -24,7 +25,7 @@ def carregar_bases_para_calculo(empresa):
     )
 
     if not bases_ok:
-        st.warning("Bases incompletas. Certifique-se de ter carregado todos os arquivos (Full, Ext, Físico) e o Catálogo Padrão.")
+        # Se as bases falharam, a função de cálculo não será chamada.
         return None
         
     return {
@@ -34,6 +35,3 @@ def carregar_bases_para_calculo(empresa):
         "catalogo_kits": dados_catalogo['kits'],
         "catalogo_simples": dados_catalogo['catalogo']
     }
-
-# --- Outras funções do seu src/data.py (Se houver) ---
-# ...
