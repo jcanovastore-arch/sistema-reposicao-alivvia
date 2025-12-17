@@ -4,7 +4,7 @@ import io
 import numpy as np
 from src import storage, utils 
 
-# Funções de suporte (Lógica de leitura CONGELADA)
+# Funções de suporte CONGELADAS
 def get_relatorio_full(empresa): return read_file_from_storage(empresa, "FULL")
 def get_vendas_externas(empresa): return read_file_from_storage(empresa, "EXT")
 def get_estoque_fisico(empresa): return read_file_from_storage(empresa, "FISICO")
@@ -16,25 +16,21 @@ def read_file_from_storage(empresa, tipo_arquivo):
     content_io = io.BytesIO(content)
     skip = 2 if tipo_arquivo == "FULL" else 0
     try:
-        try:
-            df = pd.read_excel(content_io, skiprows=skip)
-        except:
-            content_io.seek(0)
-            df = pd.read_csv(content_io, skiprows=skip, sep=None, engine='python', encoding='utf-8-sig')
-        df = utils.normalize_cols(df)
+        df = pd.read_excel(content_io, skiprows=skip)
+        df.columns = [str(c).strip().lower() for c in df.columns]
         for col in df.columns:
-            if any(k in col for k in ['sku', 'codigo', 'item', 'referencia']):
+            if 'sku' in col or 'codigo' in col:
                 df.rename(columns={col: 'sku'}, inplace=True)
                 break
         if 'sku' in df.columns:
-            df['sku'] = df['sku'].apply(utils.norm_sku)
+            df['sku'] = df['sku'].astype(str).str.strip().str.upper()
         return df
     except: return None
 
-# Explosão de Kits (Para SKUs como HANDGRIP)
 def explodir_vendas(df_vendas, df_kits, col_venda):
     if df_vendas is None or df_vendas.empty or df_kits is None or df_kits.empty:
         return pd.DataFrame(columns=['sku', col_venda])
+    
     df_merge = pd.merge(df_vendas, df_kits, left_on='sku', right_on='sku_kit', how='inner')
     df_merge['v_calc'] = df_merge[col_venda] * df_merge['quantidade_componente'].fillna(1)
     df_exp = df_merge.groupby('sku_componente')['v_calc'].sum().reset_index()
@@ -47,8 +43,8 @@ def calcular_reposicao(empresa, dias_cobertura, crescimento=0, lead_time=0):
     df_ext_raw = get_vendas_externas(empresa)      
     df_fisico_raw = get_estoque_fisico(empresa)    
     dados_cat = st.session_state.get('catalogo_dados')
-    if not dados_cat: return None
     
+    if not dados_cat: return None
     df_catalogo = dados_cat['catalogo'].copy()
     df_kits = dados_cat['kits'].copy()
 
@@ -71,7 +67,7 @@ def calcular_reposicao(empresa, dias_cobertura, crescimento=0, lead_time=0):
     else:
         v_shopee_map = pd.DataFrame(columns=['sku', 'v_s_u'])
 
-    # 4. ESTOQUE FÍSICO (JACA)
+    # 4. ESTOQUE FÍSICO
     if df_fisico_raw is not None and not df_fisico_raw.empty:
         df_fisico_raw['est_f_u'] = df_fisico_raw['estoque_atual'].apply(utils.br_to_float).fillna(0)
         df_fisico_raw['c_u'] = df_fisico_raw['preco'].apply(utils.br_to_float).fillna(0)
@@ -79,37 +75,33 @@ def calcular_reposicao(empresa, dias_cobertura, crescimento=0, lead_time=0):
     else:
         est_map = pd.DataFrame(columns=['sku', 'est_f_u', 'c_u'])
 
-    # 5. MERGE FINAL (REGRAS DE CANAL SEPARADAS)
-    # Aqui garantimos que se o merge falhar, ele não apaga os dados
+    # 5. MERGE FINAL (REGRAS DE CANAL)
     df_res = pd.merge(df_catalogo, v_full_map, on='sku', how='left')
     df_res = pd.merge(df_res, v_shopee_map, on='sku', how='left')
     df_res = pd.merge(df_res, est_map, on='sku', how='left')
     df_res.fillna(0, inplace=True)
 
-    # 6. CÁLCULO DE REPOSIÇÃO (SÓ COMPRA SE FALTAR NA "CAIXINHA")
+    # 6. CÁLCULOS
     fator = (1 + (crescimento/100))
-    # Carência FULL
     v_dia_f = (df_res['v_f_u'] * fator) / 60
     nec_f = (v_dia_f * (dias_cobertura + lead_time)) - df_res['e_f_u']
     df_res['Sugerido_Full'] = nec_f.apply(lambda x: int(np.ceil(x)) if x > 0 else 0)
     
-    # Carência FÍSICO
     v_dia_s = (df_res['v_s_u'] * fator) / 60
     nec_s = (v_dia_s * (dias_cobertura + lead_time)) - df_res['est_f_u']
     df_res['Sugerido_Fisico'] = nec_s.apply(lambda x: int(np.ceil(x)) if x > 0 else 0)
 
-    # Compra Sugerida = Soma das faltas individuais
     df_res['Compra sugerida'] = df_res['Sugerido_Full'] + df_res['Sugerido_Fisico']
     df_res['Valor total da compra sugerida'] = df_res['Compra sugerida'] * df_res['c_u']
     df_res['Valor Estoque Full'] = df_res['e_f_u'] * df_res['c_u']
     df_res['Valor Estoque Fisico'] = df_res['est_f_u'] * df_res['c_u']
 
-    # Filtros de Status
+    # Filtros Finais
     if 'status_reposicao' in df_res.columns:
-        df_res = df_res[df_res['status_reposicao'].astype(str).lower().str.strip() != 'nao_repor']
+        df_res = df_res[df_res['status_reposicao'].astype(str).str.lower() != 'nao_repor']
     
-    # Remove KITS da lista para focar em componentes
-    if not df_kits.empty:
+    # Remove KITS da lista (opcional)
+    if 'sku_kit' in df_kits.columns:
         df_res = df_res[~df_res['sku'].isin(df_kits['sku_kit'].unique())]
 
     return df_res.rename(columns={

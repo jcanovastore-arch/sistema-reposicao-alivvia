@@ -8,42 +8,46 @@ URL_PADRAO = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_I
 
 def load_catalogo_padrao(url=URL_PADRAO):
     try:
-        response = requests.get(url, timeout=15)
+        response = requests.get(url, timeout=20)
         response.raise_for_status()
         content = io.BytesIO(response.content)
         
-        # Lê as abas CATALOGO_SIMPLES e KITS
+        # Lê as abas específicas
         df_catalogo = pd.read_excel(content, sheet_name="CATALOGO_SIMPLES")
         content.seek(0)
         df_kits = pd.read_excel(content, sheet_name="KITS")
         
-        df_catalogo = utils.normalize_cols(df_catalogo)
-        df_kits = utils.normalize_cols(df_kits)
+        # Normalização básica de nomes de colunas
+        df_catalogo.columns = [str(c).strip().lower() for c in df_catalogo.columns]
+        df_kits.columns = [str(c).strip().lower() for c in df_kits.columns]
         
-        # --- MAPEAR COLUNAS DO CATÁLOGO (Aba CATALOGO_SIMPLES) ---
-        achou_sku = False
-        for col in df_catalogo.columns:
-            if col in ['sku', 'kit_sku', 'codigo', 'cod', 'item', 'referencia']:
-                df_catalogo.rename(columns={col: 'sku'}, inplace=True)
-                achou_sku = True
+        # --- FORÇAR MAPEAMENTO DO CATÁLOGO ---
+        # Procura por qualquer coluna que contenha 'sku' ou 'codigo'
+        sku_col = None
+        for c in df_catalogo.columns:
+            if 'sku' in c or 'codigo' in c or 'item' in c:
+                sku_col = c
                 break
-        if not achou_sku:
+        
+        if sku_col:
+            df_catalogo.rename(columns={sku_col: 'sku'}, inplace=True)
+        else:
+            # Se não encontrar, força a primeira coluna como 'sku'
             df_catalogo.rename(columns={df_catalogo.columns[0]: 'sku'}, inplace=True)
 
-        # --- MAPEAR COLUNAS DOS KITS (Baseado no seu ficheiro) ---
-        # kit_sku -> sku_kit | component_sku -> sku_componente | qty_por_kit -> quantidade_componente
+        # --- MAPEAR KITS (Exatamente como o seu CSV enviado) ---
         df_kits.rename(columns={
             'kit_sku': 'sku_kit',
             'component_sku': 'sku_componente',
             'qty_por_kit': 'quantidade_componente'
-        }, inplace=True)
+        }, inplace=True, errors='ignore')
 
-        # Limpeza e Padronização
-        df_catalogo['sku'] = df_catalogo['sku'].astype(str).apply(utils.norm_sku)
+        # Limpeza de SKUs
+        df_catalogo['sku'] = df_catalogo['sku'].astype(str).str.strip().str.upper()
         if 'sku_kit' in df_kits.columns:
-            df_kits['sku_kit'] = df_kits['sku_kit'].astype(str).apply(utils.norm_sku)
+            df_kits['sku_kit'] = df_kits['sku_kit'].astype(str).str.strip().str.upper()
         if 'sku_componente' in df_kits.columns:
-            df_kits['sku_componente'] = df_kits['sku_componente'].astype(str).apply(utils.norm_sku)
+            df_kits['sku_componente'] = df_kits['sku_componente'].astype(str).str.strip().str.upper()
             
         return {"catalogo": df_catalogo, "kits": df_kits}
     except Exception as e:
