@@ -24,6 +24,14 @@ def read_file_from_storage(empresa, tipo_arquivo):
             df = pd.read_csv(content_io, skiprows=skip, sep=None, engine='python', encoding='utf-8-sig')
         
         df = utils.normalize_cols(df)
+        
+        # PADRONIZAÇÃO AGRESSIVA DE SKU:
+        # Tenta encontrar qualquer coluna que pareça com SKU e renomeia para 'sku'
+        for col in df.columns:
+            if col in ['sku', 'codigo_sku', 'sku_id', 'codigo']:
+                df.rename(columns={col: 'sku'}, inplace=True)
+                break
+        
         if 'sku' in df.columns:
             df['sku'] = df['sku'].apply(utils.norm_sku)
         return df
@@ -41,27 +49,27 @@ def calcular_reposicao(empresa, dias_cobertura, crescimento=0, lead_time=0):
     df_catalogo = dados_cat['catalogo'].copy()
     df_catalogo['sku'] = df_catalogo['sku'].apply(utils.norm_sku)
 
-    # 2. Tratamento Estoque Físico e Custo
-    if df_fisico is not None and not df_fisico.empty:
+    # 2. Estoque Físico e Custo (Jaca)
+    if df_fisico is not None and 'sku' in df_fisico.columns:
         df_fisico['estoque_fisico'] = df_fisico['estoque_atual'].apply(utils.br_to_float).fillna(0)
         df_fisico['custo_unit'] = df_fisico['preco'].apply(utils.br_to_float).fillna(0)
         estoque_real = df_fisico.groupby('sku').agg({'estoque_fisico': 'sum', 'custo_unit': 'max'}).reset_index()
     else:
         estoque_real = pd.DataFrame(columns=['sku', 'estoque_fisico', 'custo_unit'])
 
-    # 3. Tratamento Vendas Full (ML)
-    if df_full is not None and not df_full.empty:
+    # 3. Vendas Full (ML)
+    if df_full is not None and 'sku' in df_full.columns:
         df_full['v_full'] = df_full['vendas_qtd_61d'].apply(utils.br_to_float).fillna(0)
         df_full['e_full'] = df_full['estoque_atual'].apply(utils.br_to_float).fillna(0)
         vendas_full = df_full.groupby('sku').agg({'v_full': 'sum', 'e_full': 'sum'}).reset_index()
     else:
         vendas_full = pd.DataFrame(columns=['sku', 'v_full', 'e_full'])
 
-    # 4. Tratamento Vendas Shopee (EXT)
-    if df_ext is not None and not df_ext.empty:
-        # Pega a coluna 'qtde_vendas' que vem do normalize_cols
-        col_venda = 'qtde_vendas' if 'qtde_vendas' in df_ext.columns else df_ext.columns[2]
-        df_ext['v_shopee'] = df_ext[col_venda].apply(utils.br_to_float).fillna(0)
+    # 4. Vendas Shopee (EXT)
+    if df_ext is not None and 'sku' in df_ext.columns:
+        # Identifica a coluna de vendas (pode ser qtde_vendas ou similar)
+        col_v = 'qtde_vendas' if 'qtde_vendas' in df_ext.columns else df_ext.columns[min(2, len(df_ext.columns)-1)]
+        df_ext['v_shopee'] = df_ext[col_v].apply(utils.br_to_float).fillna(0)
         vendas_shopee = df_ext.groupby('sku').agg({'v_shopee': 'sum'}).reset_index()
     else:
         vendas_shopee = pd.DataFrame(columns=['sku', 'v_shopee'])
@@ -74,8 +82,7 @@ def calcular_reposicao(empresa, dias_cobertura, crescimento=0, lead_time=0):
     df_res.fillna(0, inplace=True)
 
     # 6. Cálculos
-    df_res['Vendas_Total_60d'] = df_res['v_full'] + df_res['v_shopee']
-    df_res['Venda_Diaria'] = (df_res['Vendas_Total_60d'] * (1 + (crescimento/100))) / 60
+    df_res['Venda_Diaria'] = ((df_res['v_full'] + df_res['v_shopee']) * (1 + (crescimento/100))) / 60
     df_res['Estoque_Total'] = df_res['estoque_fisico'] + df_res['e_full']
     
     df_res['Compra_Sugerida'] = (df_res['Venda_Diaria'] * (dias_cobertura + lead_time)) - df_res['Estoque_Total']
